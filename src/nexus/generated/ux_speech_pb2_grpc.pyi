@@ -9,7 +9,7 @@ import grpc
 import grpc.aio
 import sys
 import typing
-from .. import ux_speech_pb2 as ux_speech_pb2
+from . import ux_speech_pb2 as ux_speech_pb2
 
 if sys.version_info >= (3, 13):
     import typing as typing_extensions
