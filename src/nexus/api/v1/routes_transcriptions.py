@@ -1,3 +1,6 @@
+#在处理多层复杂api时，通过router进行模块化管理，通常每个router对应一个文件，内部注册多个路由，通过文件结构可以清晰的概括路由结构，这也是
+#v1文件夹的作用，统一管理各层路由，参差多时可以逐步INCLUDE。
+
 from __future__ import annotations
 
 from typing import Optional
@@ -10,8 +13,11 @@ from ...services.transcriptions_service import TranscriptionsService
 from ...core.config import settings
 
 router = APIRouter()
+# prefix 决定“URL 长什么样”
+# tags 决定“文档里怎么分类展示”
+#可以在router_include时写入或覆盖prefix和tags
 
-
+#把一些可能多次利用或需要依赖注入的服务打包成类或函数，方便在路由函数中使用通过Depends注入
 def get_transcriptions_service(request: Request) -> TranscriptionsService:
     default_client = getattr(request.app.state, "default_grpc_client", None)
     return TranscriptionsService(default_client=default_client)
