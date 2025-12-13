@@ -92,3 +92,4 @@ async def transcriptions(
         status_code=200,
         content={"text": combined, "model": model, "default_grpc": f"{settings.default_grpc_host}:{settings.default_grpc_port}"},
     )
+#HTTP 请求 → routes_transcriptions.py → TranscriptionsService → UxSpeechClient → gRPC stub → 后端语音服务

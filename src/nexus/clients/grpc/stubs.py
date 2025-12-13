@@ -18,7 +18,7 @@ class UxSpeechClient:
     port: int
     channel: grpc.Channel | None = None
     stub: ux_speech_pb2_grpc.UxSpeechStub | None = None
-
+#额外的初始化逻辑放在 __post_init__ 里，便于区分，dataclass中自动生成init，运行后，直接运行post-init,
     def __post_init__(self) -> None:
         if self.channel is None:
             self.channel = create_insecure_channel(self.host, self.port)

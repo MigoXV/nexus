@@ -19,6 +19,10 @@ dependencies = [
 [tool.poetry]
 packages = [{include = "nexus", from = "src"}]
 
+# [tool.poetry.scripts]
+# speecharm = "speecharm.commands.app:app"
+
+
 [[tool.poetry.source]]
 name = "tuna"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"

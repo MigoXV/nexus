@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
-
+from .core.middleware import CustomMiddleware
 from .api.v1.routes_transcriptions import router as transcriptions_router
 from .clients.grpc.stubs import UxSpeechClient
 from .core.config import settings
@@ -9,6 +9,8 @@ from .core.config import settings
 
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name)
+     # Add custom middleware
+    app.add_middleware(CustomMiddleware)
 
     app.include_router(transcriptions_router)
 
@@ -28,3 +30,9 @@ def create_app() -> FastAPI:
 
     return app
 
+# 作用：构造 FastAPI 应用对象。
+# 一般会做：
+# 创建 FastAPI() 实例。
+# 挂载中间件（日志、CORS、鉴权等）。
+# 挂载路由（从 api/v1 引入）。
+# 注册事件（startup/shutdown）。
