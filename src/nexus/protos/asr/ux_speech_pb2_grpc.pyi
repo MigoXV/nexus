@@ -7,9 +7,9 @@ import abc
 import collections.abc
 import grpc
 import grpc.aio
+import nexus.protos.asr.ux_speech_pb2
 import sys
 import typing
-from . import ux_speech_pb2 as ux_speech_pb2
 
 if sys.version_info >= (3, 13):
     import typing as typing_extensions
@@ -28,16 +28,16 @@ GRPC_VERSION: str
 _UxSpeechStreamingRecognizeType = typing_extensions.TypeVar(
     '_UxSpeechStreamingRecognizeType',
     grpc.StreamStreamMultiCallable[
-        ux_speech_pb2.StreamingRecognizeRequest,
-        ux_speech_pb2.StreamingRecognizeResponse,
+        nexus.protos.asr.ux_speech_pb2.StreamingRecognizeRequest,
+        nexus.protos.asr.ux_speech_pb2.StreamingRecognizeResponse,
     ],
     grpc.aio.StreamStreamMultiCallable[
-        ux_speech_pb2.StreamingRecognizeRequest,
-        ux_speech_pb2.StreamingRecognizeResponse,
+        nexus.protos.asr.ux_speech_pb2.StreamingRecognizeRequest,
+        nexus.protos.asr.ux_speech_pb2.StreamingRecognizeResponse,
     ],
     default=grpc.StreamStreamMultiCallable[
-        ux_speech_pb2.StreamingRecognizeRequest,
-        ux_speech_pb2.StreamingRecognizeResponse,
+        nexus.protos.asr.ux_speech_pb2.StreamingRecognizeRequest,
+        nexus.protos.asr.ux_speech_pb2.StreamingRecognizeResponse,
     ],
 )
 
@@ -45,16 +45,16 @@ class UxSpeechStub(typing.Generic[_UxSpeechStreamingRecognizeType]):
     @typing.overload
     def __init__(self: UxSpeechStub[
         grpc.StreamStreamMultiCallable[
-            ux_speech_pb2.StreamingRecognizeRequest,
-            ux_speech_pb2.StreamingRecognizeResponse,
+            nexus.protos.asr.ux_speech_pb2.StreamingRecognizeRequest,
+            nexus.protos.asr.ux_speech_pb2.StreamingRecognizeResponse,
         ],
     ], channel: grpc.Channel) -> None: ...
 
     @typing.overload
     def __init__(self: UxSpeechStub[
         grpc.aio.StreamStreamMultiCallable[
-            ux_speech_pb2.StreamingRecognizeRequest,
-            ux_speech_pb2.StreamingRecognizeResponse,
+            nexus.protos.asr.ux_speech_pb2.StreamingRecognizeRequest,
+            nexus.protos.asr.ux_speech_pb2.StreamingRecognizeResponse,
         ],
     ], channel: grpc.aio.Channel) -> None: ...
 
@@ -62,8 +62,8 @@ class UxSpeechStub(typing.Generic[_UxSpeechStreamingRecognizeType]):
 
 UxSpeechAsyncStub: typing_extensions.TypeAlias = UxSpeechStub[
     grpc.aio.StreamStreamMultiCallable[
-        ux_speech_pb2.StreamingRecognizeRequest,
-        ux_speech_pb2.StreamingRecognizeResponse,
+        nexus.protos.asr.ux_speech_pb2.StreamingRecognizeRequest,
+        nexus.protos.asr.ux_speech_pb2.StreamingRecognizeResponse,
     ],
 ]
 
@@ -71,8 +71,8 @@ class UxSpeechServicer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def StreamingRecognize(
         self,
-        request_iterator: _MaybeAsyncIterator[ux_speech_pb2.StreamingRecognizeRequest],
+        request_iterator: _MaybeAsyncIterator[nexus.protos.asr.ux_speech_pb2.StreamingRecognizeRequest],
         context: _ServicerContext,
-    ) -> typing.Union[collections.abc.Iterator[ux_speech_pb2.StreamingRecognizeResponse], collections.abc.AsyncIterator[ux_speech_pb2.StreamingRecognizeResponse]]: ...
+    ) -> typing.Union[collections.abc.Iterator[nexus.protos.asr.ux_speech_pb2.StreamingRecognizeResponse], collections.abc.AsyncIterator[nexus.protos.asr.ux_speech_pb2.StreamingRecognizeResponse]]: ...
 
 def add_UxSpeechServicer_to_server(servicer: UxSpeechServicer, server: typing.Union[grpc.Server, grpc.aio.Server]) -> None: ...
