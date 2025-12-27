@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from nexus.api.v1 import chat as chat_api
 from nexus.api.v1 import realtime as realtime_api
 from nexus.api.v1 import transcribe as transcribe_api
+from nexus.api.v1 import tts as tts_api
 
 app = typer.Typer(
     name="nexus",
@@ -21,13 +22,21 @@ app = typer.Typer(
 logger = logging.getLogger(__name__)
 
 
-def create_fastapi_app(grpc_addr: str, chat_base_url: str, chat_api_key: str) -> FastAPI:
+def create_fastapi_app(
+    grpc_addr: str,
+    chat_base_url: str,
+    chat_api_key: str,
+    tts_base_url: str,
+    tts_api_key: str,
+) -> FastAPI:
     """创建 FastAPI 应用实例"""
     # 配置 gRPC 地址
     transcribe_api.configure(grpc_addr=grpc_addr)
     realtime_api.configure(grpc_addr=grpc_addr)
     # 配置 Chat API
     chat_api.configure(base_url=chat_base_url, api_key=chat_api_key)
+    # 配置 TTS API
+    tts_api.configure(base_url=tts_base_url, api_key=tts_api_key)
 
     fastapi_app = FastAPI(
         title="Nexus ASR API",
@@ -39,6 +48,7 @@ def create_fastapi_app(grpc_addr: str, chat_base_url: str, chat_api_key: str) ->
     fastapi_app.include_router(transcribe_api.router, prefix="/v1")
     fastapi_app.include_router(realtime_api.router, prefix="/v1")
     fastapi_app.include_router(chat_api.router, prefix="/v1")
+    fastapi_app.include_router(tts_api.router, prefix="/v1")
 
     @fastapi_app.get("/health")
     async def health_check():
@@ -109,6 +119,19 @@ def serve(
         help="Chat 后端 API 密钥",
         envvar="NEXUS_CHAT_API_KEY",
     ),
+    # TTS API 参数
+    tts_base_url: str = typer.Option(
+        "http://localhost:8080/v1",
+        "--tts-base-url",
+        help="TTS 后端 API 地址",
+        envvar="NEXUS_TTS_BASE_URL",
+    ),
+    tts_api_key: str = typer.Option(
+        "no-key",
+        "--tts-api-key",
+        help="TTS 后端 API 密钥",
+        envvar="NEXUS_TTS_API_KEY",
+    ),
 ):
     """
     启动 HTTP API 服务器
@@ -122,6 +145,7 @@ def serve(
     logger.info(f"Starting Nexus API server on {host}:{port}")
     logger.info(f"gRPC ASR backend: {grpc_addr}")
     logger.info(f"Chat backend: {chat_base_url}")
+    logger.info(f"TTS backend: {tts_base_url}")
     logger.info(
         f"ssl_certfile: {ssl_certfile}, ssl_keyfile: {ssl_keyfile}, ssl_ca_certs: {ssl_ca_certs}"
     )
@@ -130,6 +154,8 @@ def serve(
         grpc_addr=grpc_addr,
         chat_base_url=chat_base_url,
         chat_api_key=chat_api_key,
+        tts_base_url=tts_base_url,
+        tts_api_key=tts_api_key,
     )
 
     # 启动 uvicorn
