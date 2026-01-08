@@ -11,6 +11,7 @@ class Settings:
     """应用配置"""
 
     grpc_addr: str = "localhost:50051"
+    interim_results: bool = False
 
 
 class TranscriptionBase64Request(BaseModel):

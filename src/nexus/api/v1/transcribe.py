@@ -31,15 +31,19 @@ def get_settings() -> Settings:
     return _settings
 
 
-def configure(grpc_addr: str):
+def configure(grpc_addr: str, interim_results: bool = False):
     """配置全局设置"""
     _settings.grpc_addr = grpc_addr
+    _settings.interim_results = interim_results
 
 
 def get_transcribe_service(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> TranscribeService:
-    return TranscribeService(grpc_addr=settings.grpc_addr)
+    return TranscribeService(
+        grpc_addr=settings.grpc_addr,
+        interim_results=settings.interim_results,
+    )
 
 
 # ============== API 端点 ==============

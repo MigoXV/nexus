@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import io
-import ssl
-import base64
 import asyncio
-
-from tqdm import trange
-from pydub import AudioSegment
+import base64
+import io
+import os
+import ssl
 
 from openai import AsyncOpenAI
 from openai.resources.realtime.realtime import AsyncRealtimeConnection
+from pydub import AudioSegment
+from tqdm import trange
 
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 
@@ -50,7 +50,6 @@ async def send_audio_from_file(connection: AsyncRealtimeConnection, audio_data: 
     # 🔴 先发送 response.create 启动流式转录
     await connection.send({"type": "response.create", "response": {}})
 
-
     for i in trange(0, len(audio_data), CHUNK_SIZE):
         chunk = audio_data[i : i + CHUNK_SIZE]
         await connection.send(
@@ -67,7 +66,9 @@ async def send_audio_from_file(connection: AsyncRealtimeConnection, audio_data: 
     await connection.send({"type": "input_audio_buffer.commit"})
 
 
-async def receive_responses(connection: AsyncRealtimeConnection, done_event: asyncio.Event):
+async def receive_responses(
+    connection: AsyncRealtimeConnection, done_event: asyncio.Event
+):
     """接收并实时打印服务器返回的结果"""
     async for event in connection:
         event_type = event.type
@@ -112,13 +113,15 @@ async def main():
 
     # 创建 OpenAI 客户端
     client = AsyncOpenAI(
-        base_url="https://localhost:8000/v1",
-        api_key="test_api_key",
+        base_url=os.getenv("TEST_BASR_URL", "http://localhost:10002/v1"),
+        api_key=os.getenv("TEST_API_KEY", "dummy_api_key"),
     )
 
     async with client.beta.realtime.connect(
         model="gpt-4o-realtime-preview",
-        websocket_connection_options={"ssl": ssl_context},  # 🔴 关键：传递 SSL 上下文禁用证书校验
+        websocket_connection_options={
+            "ssl": ssl_context
+        },  # 🔴 关键：传递 SSL 上下文禁用证书校验
     ) as connection:
         print("Connected to realtime API")
 
