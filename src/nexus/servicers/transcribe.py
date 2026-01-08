@@ -29,13 +29,15 @@ class TranscribeService:
     封装 gRPC Inferencer 调用，处理音频数据格式转换
     """
 
-    def __init__(self, grpc_addr: str):
+    def __init__(self, grpc_addr: str, interim_results: bool = False):
         """
         初始化转录服务
 
         :param grpc_addr: gRPC 服务器地址 (host:port)
+        :param interim_results: 是否启用中间结果返回
         """
         self.grpc_addr = grpc_addr
+        self.interim_results = interim_results
 
     def _pcm_to_chunks(
         self, pcm_data: bytes, chunk_size: int = 3200
@@ -78,6 +80,7 @@ class TranscribeService:
                 sample_rate=sample_rate,
                 language_code=language,
                 hotwords=hotwords,
+                interim_results=self.interim_results,
             ):
                 if is_final:
                     transcripts.append(transcript)
@@ -109,6 +112,7 @@ class TranscribeService:
                 sample_rate=sample_rate,
                 language_code=language,
                 hotwords=hotwords,
+                interim_results=self.interim_results,
             ):
                 if transcript:
                     yield transcript

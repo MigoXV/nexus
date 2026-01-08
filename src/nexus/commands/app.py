@@ -29,11 +29,12 @@ def create_fastapi_app(
     chat_api_key: str,
     tts_base_url: str,
     tts_api_key: str,
+    interim_results: bool = False,
 ) -> FastAPI:
     """创建 FastAPI 应用实例"""
     # 配置 gRPC 地址
-    transcribe_api.configure(grpc_addr=grpc_addr)
-    realtime_api.configure(grpc_addr=grpc_addr)
+    transcribe_api.configure(grpc_addr=grpc_addr, interim_results=interim_results)
+    realtime_api.configure(grpc_addr=grpc_addr, interim_results=interim_results)
     # 配置 Chat API
     depends.configure_chat(base_url=chat_base_url, api_key=chat_api_key)
     # 配置 TTS API
@@ -66,6 +67,12 @@ def serve(
         "-g",
         help="gRPC ASR 服务地址",
         envvar="NEXUS_GRPC_ADDR",
+    ),
+    interim_results: bool = typer.Option(
+        False,
+        "--interim-results/--no-interim-results",
+        help="是否启用中间结果返回",
+        envvar="NEXUS_INTERIM_RESULTS",
     ),
     # Chat API 参数
     chat_base_url: str = typer.Option(
@@ -157,6 +164,7 @@ def serve(
         chat_api_key=chat_api_key,
         tts_base_url=tts_base_url,
         tts_api_key=tts_api_key,
+        interim_results=interim_results,
     )
 
     # 启动 uvicorn

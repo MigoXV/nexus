@@ -118,7 +118,7 @@ async def create_chat_completion(
     兼容 OpenAI Chat API 格式
     支持 stream=True 参数返回 SSE 流式响应
     """
-
+    logger.info(f"Request received: model={model}, len(messages)={len(messages)}")
     if stream:
         # 流式响应
         return StreamingResponse(

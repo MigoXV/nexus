@@ -35,12 +35,13 @@ def get_settings() -> Settings:
     return _settings
 
 
-def configure(grpc_addr: str):
+def configure(grpc_addr: str, interim_results: bool = False):
     """配置全局设置"""
     global _settings
     if _settings is None:
         _settings = Settings()
     _settings.grpc_addr = grpc_addr
+    _settings.interim_results = interim_results
 
 
 # ============== 数据结构 ==============
@@ -83,8 +84,6 @@ async def realtime_endpoint(
         model=model,
     )
 
-    logger.info(f"WebSocket connected: session_id={session.session_id}, model={model}")
-
     # 发送 session.created 事件
     await _send_event(
         websocket,
@@ -100,7 +99,7 @@ async def realtime_endpoint(
 
     # 用于接收转录结果的队列
     result_queue: asyncio.Queue = asyncio.Queue()
-    
+
     # 后台任务：发送转录结果
     send_results_task: Optional[asyncio.Task] = None
     response_id: Optional[str] = None
@@ -110,22 +109,22 @@ async def realtime_endpoint(
         while True:
             # 同时处理：接收消息 和 发送转录结果
             receive_task = asyncio.create_task(websocket.receive_text())
-            
+
             # 构建等待任务列表
             pending_tasks = {receive_task}
             if send_results_task and not send_results_task.done():
                 pending_tasks.add(send_results_task)
-            
+
             # 同时等待消息和发送结果
             done, pending = await asyncio.wait(
                 pending_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            
+
             # 检查发送任务是否完成
             if send_results_task in done:
                 send_results_task = None
-            
+
             # 检查是否收到消息
             if receive_task in done:
                 data = receive_task.result()
@@ -140,7 +139,9 @@ async def realtime_endpoint(
                     if audio_base64:
                         audio_bytes = base64.b64decode(audio_base64)
                         session.audio_queue.put(audio_bytes)
-                        logger.debug(f"Audio chunk added: {len(audio_bytes)} bytes, queue size: {session.audio_queue.qsize()}")
+                        logger.debug(
+                            f"Audio chunk added: {len(audio_bytes)} bytes, queue size: {session.audio_queue.qsize()}"
+                        )
 
                 elif event_type == "input_audio_buffer.commit":
                     # 标记音频流结束
@@ -153,7 +154,9 @@ async def realtime_endpoint(
                     response_id = f"resp_{uuid.uuid4().hex[:24]}"
                     item_id = f"item_{uuid.uuid4().hex[:24]}"
 
-                    logger.info(f"Starting streaming transcription: response_id={response_id}")
+                    logger.info(
+                        f"Starting streaming transcription: response_id={response_id}"
+                    )
 
                     # 发送 response.created 事件
                     await _send_event(
@@ -173,7 +176,14 @@ async def realtime_endpoint(
                     loop = asyncio.get_event_loop()
                     transcription_thread = threading.Thread(
                         target=_transcribe_stream_worker,
-                        args=(session, settings, result_queue, loop, response_id, item_id),
+                        args=(
+                            session,
+                            settings,
+                            result_queue,
+                            loop,
+                            response_id,
+                            item_id,
+                        ),
                         daemon=True,
                     )
                     transcription_thread.start()
@@ -189,7 +199,9 @@ async def realtime_endpoint(
                     # 更新会话配置
                     session_config = event.get("session", {})
                     if "input_audio_transcription" in session_config:
-                        transcription_config = session_config["input_audio_transcription"]
+                        transcription_config = session_config[
+                            "input_audio_transcription"
+                        ]
                         if "language" in transcription_config:
                             session.language = transcription_config["language"]
                     logger.info(f"Session updated: language={session.language}")
@@ -327,7 +339,9 @@ async def _send_streaming_results(
         except queue.Empty:
             break
 
-    logger.info(f"Transcription completed: {full_transcript[:100] if full_transcript else '(empty)'}...")
+    logger.info(
+        f"Transcription completed: {full_transcript[:100] if full_transcript else '(empty)'}..."
+    )
 
 
 def _transcribe_stream_worker(
@@ -361,6 +375,7 @@ def _transcribe_stream_worker(
                 audio=audio_generator(),
                 sample_rate=session.sample_rate,
                 language_code=session.language,
+                interim_results=settings.interim_results,
             ):
                 # 将结果放入队列
                 loop.call_soon_threadsafe(

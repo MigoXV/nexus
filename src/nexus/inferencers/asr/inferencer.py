@@ -50,6 +50,7 @@ class Inferencer:
         enable_automatic_punctuation: bool = True,
         hotwords: Optional[List[str]] = None,
         hotword_bias: float = 0.0,
+        interim_results: bool = True,
     ) -> Generator[Tuple[str, bool], None, None]:
         """
         执行一次性离线语音识别。
@@ -61,6 +62,7 @@ class Inferencer:
         :param enable_automatic_punctuation: 是否启用自动标点
         :param hotwords: 热词列表
         :param hotword_bias: 热词偏置
+        :param interim_results: 是否启用中间结果返回
         :return: 生成器，返回 (文本, is_final) 元组。is_final=True 表示最终结果，False 表示中间结果
         """
         hotwords = hotwords or []
@@ -74,7 +76,7 @@ class Inferencer:
                 hotwords=hotwords,
                 hotword_bias=hotword_bias,
             ),
-            interim_results=True,
+            interim_results=interim_results,
         )
 
         try:
@@ -87,6 +89,8 @@ class Inferencer:
                     alternative = result.alternative
                     transcript = alternative.transcript
                     is_final = result.is_final
+                    if not interim_results and not is_final:
+                        continue
                     yield (transcript, is_final)
         except grpc.RpcError as err:
             logger.error("gRPC error during ASR inference: %s", err)
