@@ -1,12 +1,14 @@
 import os
 
 import dotenv
+import httpx
 import openai
 
 dotenv.load_dotenv()
 client = openai.OpenAI(
     base_url=os.getenv("TEST_BASR_URL", "http://localhost:10002/v1"),
     api_key=os.getenv("TEST_API_KEY", "dummy_api_key"),
+    http_client=httpx.Client(verify=False),  # 🔴 关键：关闭证书校验
 )
 
 tools = [
@@ -51,6 +53,12 @@ print(f"User>\t {messages}")
 tool = message.tool_calls[0]
 messages.append(message)
 
-messages.append({"role": "tool", "tool_call_id": tool.id, "content": "来了外星人，密密麻麻的全是外星飞船"})
+messages.append(
+    {
+        "role": "tool",
+        "tool_call_id": tool.id,
+        "content": "来了外星人，密密麻麻的全是外星飞船",
+    }
+)
 message = send_messages(messages)
 print(f"Model>\t {message.content}")
