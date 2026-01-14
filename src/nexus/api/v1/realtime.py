@@ -142,12 +142,56 @@ async def realtime_endpoint(
                         logger.debug(
                             f"Audio chunk added: {len(audio_bytes)} bytes, queue size: {session.audio_queue.qsize()}"
                         )
+                        
+                        # 如果还未开始转录,自动启动转录线程
+                        if not session.is_streaming:
+                            response_id = f"resp_{uuid.uuid4().hex[:24]}"
+                            item_id = f"item_{uuid.uuid4().hex[:24]}"
+                            
+                            logger.info(
+                                f"Auto-starting streaming transcription on first audio: response_id={response_id}"
+                            )
+                            
+                            # 发送 response.created 事件
+                            await _send_event(
+                                websocket,
+                                {
+                                    "type": "response.created",
+                                    "response": {
+                                        "id": response_id,
+                                        "status": "in_progress",
+                                    },
+                                },
+                            )
+                            
+                            session.is_streaming = True
+                            
+                            # 启动转录线程
+                            loop = asyncio.get_event_loop()
+                            transcription_thread = threading.Thread(
+                                target=_transcribe_stream_worker,
+                                args=(
+                                    session,
+                                    settings,
+                                    result_queue,
+                                    loop,
+                                    response_id,
+                                    item_id,
+                                ),
+                                daemon=True,
+                            )
+                            transcription_thread.start()
+                            
+                            # 启动后台任务发送转录结果
+                            send_results_task = asyncio.create_task(
+                                _send_streaming_results(
+                                    websocket, session, result_queue, response_id, item_id
+                                )
+                            )
 
                 elif event_type == "input_audio_buffer.commit":
-                    # 标记音频流结束
-                    session.stream_done = True
-                    session.audio_queue.put(None)  # 发送结束标记
-                    logger.info("Audio buffer committed (stream done)")
+                    # gRPC后端自带VAD,无需显式commit,仅记录日志
+                    logger.info("Audio buffer commit received (ignored, backend has VAD)")
 
                 elif event_type == "response.create":
                     # 开始流式转录
@@ -355,18 +399,16 @@ def _transcribe_stream_worker(
     """后台线程：从音频队列读取数据并进行流式转录"""
 
     def audio_generator():
-        """从队列生成音频块"""
-        while True:
+        """从队列生成音频块,持续推送给gRPC后端(后端自带VAD)"""
+        while session.is_streaming:
             try:
                 chunk = session.audio_queue.get(timeout=0.5)
                 if chunk is None:
-                    # 结束标记
-                    break
+                    # 跳过None标记,继续处理
+                    continue
                 yield np.frombuffer(chunk, dtype=np.int16)
             except queue.Empty:
-                # 队列为空但未结束，继续等待
-                if session.stream_done:
-                    break
+                # 队列为空,继续等待新音频
                 continue
 
     try:
