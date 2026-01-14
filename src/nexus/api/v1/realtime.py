@@ -463,7 +463,7 @@ def _transcribe_stream_worker(
                 yield np.frombuffer(chunk, dtype=np.int16)
             except queue.Empty:
                 # 队列为空,继续等待新音频
-                continue
+                pass
 
     try:
         with Inferencer(settings.grpc_addr) as inferencer:
