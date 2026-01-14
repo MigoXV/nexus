@@ -12,10 +12,20 @@ from nexus.protos.asr import ux_speech_pb2_grpc as pb2_grpc
 logger = logging.getLogger(__name__)
 
 
-def request_iter(streaming_config, audio_iterator):
+def request_iter(
+    streaming_config, audio_iterator, chunk_size: int = 3200
+) -> Iterator[pb2.StreamingRecognizeRequest]:
     yield pb2.StreamingRecognizeRequest(streaming_config=streaming_config)
+    buffer = np.array([], dtype=np.int16)
     for audio_chunk in audio_iterator:
-        audio_bytes = audio_chunk.tobytes()
+        buffer = np.concatenate((buffer, audio_chunk))
+        while len(buffer) >= chunk_size:  # since dtype=np.int16, 2 bytes per sample
+            chunk = buffer[:chunk_size]
+            buffer = buffer[chunk_size:]
+            audio_bytes = chunk.tobytes()
+            yield pb2.StreamingRecognizeRequest(audio_content=audio_bytes)
+    if len(buffer) > 0:
+        audio_bytes = buffer.tobytes()
         yield pb2.StreamingRecognizeRequest(audio_content=audio_bytes)
 
 
