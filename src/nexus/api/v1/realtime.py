@@ -70,12 +70,10 @@ async def realtime_endpoint(
         },
     )
 
-    # 用于接收转录结果的队列
-    result_queue: asyncio.Queue = asyncio.Queue()
+    # 生成响应 ID
+    response_id = f"resp_{uuid.uuid4().hex[:24]}"
+    item_id = f"item_{uuid.uuid4().hex[:24]}"
 
-    # 后台任务：发送转录结果
-    send_results_task: Optional[asyncio.Task] = None
-    audio: np.ndarray = np.array([], dtype=np.int16)
     session: RealtimeSession = RealtimeSession(model=model)
     servicer: RealtimeServicer = RealtimeServicer(
         grpc_addr=settings.grpc_addr, interim_results=settings.interim_results
@@ -85,6 +83,11 @@ async def realtime_endpoint(
         args=(session,),
         daemon=True,
     ).start()
+
+    # 启动后台任务：从 result_queue 读取转录结果并发送
+    send_results_task = asyncio.create_task(
+        _send_results_from_queue(websocket, session, response_id, item_id)
+    )
 
     try:
         while True:
@@ -116,15 +119,20 @@ async def realtime_endpoint(
                         audio_chunk = np.frombuffer(audio_bytes, dtype=np.int16)
                         session.audio_queue.put(audio_chunk)
                 elif event_type == "response.cancel":
-                    print("Response cancelled")
-                    # # 清空音频队列
-                    # while not session.audio_queue.empty():
-                    #     try:
-                    #         session.audio_queue.get_nowait()
-                    #     except queue.Empty:
-                    #         break
-
-                    # logger.info("Response cancelled, session reset")
+                    logger.info("Response cancelled")
+                    # 清空音频队列
+                    while not session.audio_queue.empty():
+                        try:
+                            session.audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
+            else:
+                # 消息接收被取消，重新循环
+                receive_task.cancel()
+                try:
+                    await receive_task
+                except asyncio.CancelledError:
+                    pass
     except Exception as e:
         logger.exception(f"WebSocket error: {e}")
         await _send_event(
@@ -425,6 +433,76 @@ async def realtime_endpoint(
 async def _send_event(websocket: WebSocket, event: dict):
     """发送事件到 WebSocket"""
     await websocket.send_text(json.dumps(event, ensure_ascii=False))
+
+
+async def _send_results_from_queue(
+    websocket: WebSocket,
+    session: RealtimeSession,
+    response_id: str,
+    item_id: str,
+):
+    """后台任务：从 session.result_queue 读取转录结果并发送到 WebSocket"""
+    loop = asyncio.get_event_loop()
+
+    try:
+        while True:
+            # 在线程池中等待队列结果（避免阻塞事件循环）
+            result = await loop.run_in_executor(
+                None, lambda: session.result_queue.get(timeout=0.1)
+            )
+
+            if result is None:
+                # 转录线程结束
+                break
+            elif result.get("type") == "transcript":
+                transcript = result.get("text", "")
+                is_final = result.get("is_final", False)
+
+                if transcript:
+                    # 发送增量转录结果
+                    await _send_event(
+                        websocket,
+                        {
+                            "type": "response.audio_transcript.delta",
+                            "response_id": response_id,
+                            "item_id": item_id,
+                            "delta": transcript,
+                        },
+                    )
+
+                    # 对于最终结果，也发送 done 事件
+                    if is_final:
+                        await _send_event(
+                            websocket,
+                            {
+                                "type": "response.audio_transcript.done",
+                                "response_id": response_id,
+                                "item_id": item_id,
+                                "transcript": transcript,
+                            },
+                        )
+                        logger.info(f"Transcript segment: {transcript[:100]}...")
+
+            elif result.get("type") == "error":
+                await _send_event(
+                    websocket,
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "transcription_error",
+                            "message": result.get("message", "Unknown error"),
+                        },
+                    },
+                )
+                break
+
+    except queue.Empty:
+        # 超时，继续等待
+        pass
+    except Exception as e:
+        logger.exception(f"Error sending results: {e}")
+
+    logger.info("Send results task ended")
 
 
 async def _send_streaming_results(
