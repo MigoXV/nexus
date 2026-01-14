@@ -58,6 +58,7 @@ class RealtimeSession:
     language: str = "zh-CN"
     is_streaming: bool = False
     stream_done: bool = False
+    cancelled: bool = False
 
 
 # ============== WebSocket 端点 ==============
@@ -145,6 +146,9 @@ async def realtime_endpoint(
                         
                         # 如果还未开始转录,自动启动转录线程
                         if not session.is_streaming:
+                            session.cancelled = False
+                            session.stream_done = False
+                            result_queue = asyncio.Queue()
                             response_id = f"resp_{uuid.uuid4().hex[:24]}"
                             item_id = f"item_{uuid.uuid4().hex[:24]}"
                             
@@ -210,6 +214,9 @@ async def realtime_endpoint(
                                     
                                     # 如果还未开始转录,自动启动转录线程
                                     if not session.is_streaming:
+                                        session.cancelled = False
+                                        session.stream_done = False
+                                        result_queue = asyncio.Queue()
                                         response_id = f"resp_{uuid.uuid4().hex[:24]}"
                                         item_id = f"item_{uuid.uuid4().hex[:24]}"
                                         
@@ -256,12 +263,10 @@ async def realtime_endpoint(
 
                 elif event_type == "response.cancel":
                     # 取消当前响应
-                    if send_results_task and not send_results_task.done():
-                        send_results_task.cancel()
-                        send_results_task = None
-                    
                     # 重置会话状态
+                    session.cancelled = True
                     session.is_streaming = False
+                    session.stream_done = True
                     
                     # 清空音频队列
                     while not session.audio_queue.empty():
@@ -273,7 +278,14 @@ async def realtime_endpoint(
                     logger.info("Response cancelled, session reset")
 
                 elif event_type == "response.create":
+                    if session.is_streaming and send_results_task and not send_results_task.done():
+                        logger.info("Response already in progress, ignoring response.create")
+                        continue
+
                     # 开始流式转录
+                    session.cancelled = False
+                    session.stream_done = False
+                    result_queue = asyncio.Queue()
                     response_id = f"resp_{uuid.uuid4().hex[:24]}"
                     item_id = f"item_{uuid.uuid4().hex[:24]}"
 
@@ -383,62 +395,84 @@ async def _send_streaming_results(
     item_id: str,
 ):
     """后台任务：持续发送转录结果（边收边发），支持多轮VAD分段"""
-    
-    while session.is_streaming:
-        try:
-            # 等待结果，超时 50ms 以便快速响应
-            event = await asyncio.wait_for(result_queue.get(), timeout=0.05)
 
-            if event is None:
-                # 转录线程结束
-                break
-            elif event.get("type") == "transcript":
-                # 转录结果
-                transcript = event.get("text", "")
-                is_final = event.get("is_final", False)
+    final_status = "completed"
+    try:
+        while session.is_streaming:
+            try:
+                # 等待结果，超时 50ms 以便快速响应
+                event = await asyncio.wait_for(result_queue.get(), timeout=0.05)
 
-                if transcript:
-                    # 立即发送增量转录结果
-                    await _send_event(
-                        websocket,
-                        {
-                            "type": "response.output_audio_transcript.delta",
-                            "response_id": response_id,
-                            "item_id": item_id,
-                            "delta": transcript,
-                        },
-                    )
-                    
-                    # 对于最终结果，也发送done事件
-                    if is_final:
+                if event is None:
+                    # 转录线程结束
+                    break
+                elif event.get("type") == "transcript":
+                    # 转录结果
+                    transcript = event.get("text", "")
+                    is_final = event.get("is_final", False)
+
+                    if transcript:
+                        # 立即发送增量转录结果
                         await _send_event(
                             websocket,
                             {
-                                "type": "response.output_audio_transcript.done",
+                                "type": "response.output_audio_transcript.delta",
                                 "response_id": response_id,
                                 "item_id": item_id,
-                                "transcript": transcript,
+                                "delta": transcript,
                             },
                         )
-                        logger.info(f"Transcript segment: {transcript[:100]}...")
-                        
-            elif event.get("type") == "error":
-                # 错误
-                await _send_event(
-                    websocket,
-                    {
-                        "type": "error",
-                        "error": {
-                            "type": "transcription_error",
-                            "message": event.get("message", "Unknown error"),
+
+                        # 对于最终结果，也发送done事件
+                        if is_final:
+                            await _send_event(
+                                websocket,
+                                {
+                                    "type": "response.output_audio_transcript.done",
+                                    "response_id": response_id,
+                                    "item_id": item_id,
+                                    "transcript": transcript,
+                                },
+                            )
+                            logger.info(f"Transcript segment: {transcript[:100]}...")
+
+                elif event.get("type") == "error":
+                    # 错误
+                    final_status = "failed"
+                    await _send_event(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "transcription_error",
+                                "message": event.get("message", "Unknown error"),
+                            },
                         },
+                    )
+                    break
+            except asyncio.TimeoutError:
+                # 超时，继续等待
+                pass
+    finally:
+        if session.cancelled:
+            final_status = "cancelled"
+        session.is_streaming = False
+        session.stream_done = True
+        try:
+            # 显式结束响应，便于客户端进入下一轮
+            await _send_event(
+                websocket,
+                {
+                    "type": "response.done",
+                    "response": {
+                        "id": response_id,
+                        "status": final_status,
                     },
-                )
-                break
-        except asyncio.TimeoutError:
-            # 超时，继续等待
-            pass
-    
+                },
+            )
+        except Exception:
+            logger.debug("Failed to send response.done", exc_info=True)
+
     logger.info("Streaming results task ended")
 
 
