@@ -310,7 +310,7 @@ async def _send_streaming_results(
                     await _send_event(
                         websocket,
                         {
-                            "type": "response.audio_transcript.delta",
+                            "type": "response.output_audio_transcript.delta",
                             "response_id": response_id,
                             "item_id": item_id,
                             "delta": transcript,
@@ -341,7 +341,7 @@ async def _send_streaming_results(
     await _send_event(
         websocket,
         {
-            "type": "response.audio_transcript.done",
+            "type": "response.output_audio_transcript.done",
             "response_id": response_id,
             "item_id": item_id,
             "transcript": full_transcript,
