@@ -54,7 +54,7 @@ class RealtimeSession:
     session_id: str
     model: str = "gpt-4o-realtime-preview"
     audio_queue: queue.Queue = field(default_factory=queue.Queue)
-    sample_rate: int = 16000
+    sample_rate: int = 24000
     language: str = "zh-CN"
     is_streaming: bool = False
     stream_done: bool = False
@@ -242,13 +242,28 @@ async def realtime_endpoint(
                 elif event_type == "session.update":
                     # 更新会话配置
                     session_config = event.get("session", {})
+                    
+                    # 更新音频转录配置（语言）
                     if "input_audio_transcription" in session_config:
                         transcription_config = session_config[
                             "input_audio_transcription"
                         ]
                         if "language" in transcription_config:
                             session.language = transcription_config["language"]
-                    logger.info(f"Session updated: language={session.language}")
+                    
+                    # 更新音频格式配置（采样率）
+                    if "input_audio_format" in session_config:
+                        audio_format = session_config["input_audio_format"]
+                        # 支持 "pcm16" 或带采样率的格式如 "pcm16_16000"
+                        if audio_format.startswith("pcm16"):
+                            parts = audio_format.split("_")
+                            if len(parts) > 1:
+                                try:
+                                    session.sample_rate = int(parts[1])
+                                except ValueError:
+                                    logger.warning(f"Invalid sample rate in format: {audio_format}")
+                    
+                    logger.info(f"Session updated: language={session.language}, sample_rate={session.sample_rate}")
 
                 else:
                     logger.warning(f"Unknown event type: {event_type}")
