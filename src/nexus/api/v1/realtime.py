@@ -193,6 +193,67 @@ async def realtime_endpoint(
                     # gRPC后端自带VAD,无需显式commit,仅记录日志
                     logger.info("Audio buffer commit received (ignored, backend has VAD)")
 
+                elif event_type == "conversation.item.create":
+                    # 处理完整音频消息（非流式）
+                    item = event.get("item", {})
+                    if item.get("type") == "message" and item.get("role") == "user":
+                        content_list = item.get("content", [])
+                        for content_item in content_list:
+                            if content_item.get("type") == "input_audio":
+                                audio_base64 = content_item.get("audio", "")
+                                if audio_base64:
+                                    audio_bytes = base64.b64decode(audio_base64)
+                                    session.audio_queue.put(audio_bytes)
+                                    logger.info(
+                                        f"Conversation item audio added: {len(audio_bytes)} bytes"
+                                    )
+                                    
+                                    # 如果还未开始转录,自动启动转录线程
+                                    if not session.is_streaming:
+                                        response_id = f"resp_{uuid.uuid4().hex[:24]}"
+                                        item_id = f"item_{uuid.uuid4().hex[:24]}"
+                                        
+                                        logger.info(
+                                            f"Auto-starting transcription for conversation item: response_id={response_id}"
+                                        )
+                                        
+                                        # 发送 response.created 事件
+                                        await _send_event(
+                                            websocket,
+                                            {
+                                                "type": "response.created",
+                                                "response": {
+                                                    "id": response_id,
+                                                    "status": "in_progress",
+                                                },
+                                            },
+                                        )
+                                        
+                                        session.is_streaming = True
+                                        
+                                        # 启动转录线程
+                                        loop = asyncio.get_event_loop()
+                                        transcription_thread = threading.Thread(
+                                            target=_transcribe_stream_worker,
+                                            args=(
+                                                session,
+                                                settings,
+                                                result_queue,
+                                                loop,
+                                                response_id,
+                                                item_id,
+                                            ),
+                                            daemon=True,
+                                        )
+                                        transcription_thread.start()
+                                        
+                                        # 启动后台任务发送转录结果
+                                        send_results_task = asyncio.create_task(
+                                            _send_streaming_results(
+                                                websocket, session, result_queue, response_id, item_id
+                                            )
+                                        )
+
                 elif event_type == "response.create":
                     # 开始流式转录
                     response_id = f"resp_{uuid.uuid4().hex[:24]}"
