@@ -254,6 +254,24 @@ async def realtime_endpoint(
                                             )
                                         )
 
+                elif event_type == "response.cancel":
+                    # 取消当前响应
+                    if send_results_task and not send_results_task.done():
+                        send_results_task.cancel()
+                        send_results_task = None
+                    
+                    # 重置会话状态
+                    session.is_streaming = False
+                    
+                    # 清空音频队列
+                    while not session.audio_queue.empty():
+                        try:
+                            session.audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    
+                    logger.info("Response cancelled, session reset")
+
                 elif event_type == "response.create":
                     # 开始流式转录
                     response_id = f"resp_{uuid.uuid4().hex[:24]}"
@@ -364,18 +382,16 @@ async def _send_streaming_results(
     response_id: str,
     item_id: str,
 ):
-    """后台任务：持续发送转录结果（边收边发）"""
-    transcripts: List[str] = []
-    done = False
-
-    while not done:
+    """后台任务：持续发送转录结果（边收边发），支持多轮VAD分段"""
+    
+    while session.is_streaming:
         try:
             # 等待结果，超时 50ms 以便快速响应
             event = await asyncio.wait_for(result_queue.get(), timeout=0.05)
 
             if event is None:
-                # 结束标记
-                done = True
+                # 转录线程结束
+                break
             elif event.get("type") == "transcript":
                 # 转录结果
                 transcript = event.get("text", "")
@@ -392,9 +408,20 @@ async def _send_streaming_results(
                             "delta": transcript,
                         },
                     )
-
-                if is_final and transcript:
-                    transcripts.append(transcript)
+                    
+                    # 对于最终结果，也发送done事件
+                    if is_final:
+                        await _send_event(
+                            websocket,
+                            {
+                                "type": "response.output_audio_transcript.done",
+                                "response_id": response_id,
+                                "item_id": item_id,
+                                "transcript": transcript,
+                            },
+                        )
+                        logger.info(f"Transcript segment: {transcript[:100]}...")
+                        
             elif event.get("type") == "error":
                 # 错误
                 await _send_event(
@@ -407,61 +434,12 @@ async def _send_streaming_results(
                         },
                     },
                 )
-                done = True
+                break
         except asyncio.TimeoutError:
             # 超时，继续等待
             pass
-
-    # 发送完成的转录结果
-    full_transcript = "".join(transcripts)
-    await _send_event(
-        websocket,
-        {
-            "type": "response.output_audio_transcript.done",
-            "response_id": response_id,
-            "item_id": item_id,
-            "transcript": full_transcript,
-        },
-    )
-
-    # 发送 response.done 事件
-    await _send_event(
-        websocket,
-        {
-            "type": "response.done",
-            "response": {
-                "id": response_id,
-                "status": "completed",
-                "output": [
-                    {
-                        "id": item_id,
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "audio_transcript",
-                                "transcript": full_transcript,
-                            }
-                        ],
-                    }
-                ],
-            },
-        },
-    )
-
-    # 清理会话状态
-    session.is_streaming = False
-    session.stream_done = False
-    # 清空队列，为下一轮准备
-    while not session.audio_queue.empty():
-        try:
-            session.audio_queue.get_nowait()
-        except queue.Empty:
-            break
-
-    logger.info(
-        f"Transcription completed: {full_transcript[:100] if full_transcript else '(empty)'}..."
-    )
+    
+    logger.info("Streaming results task ended")
 
 
 def _transcribe_stream_worker(
