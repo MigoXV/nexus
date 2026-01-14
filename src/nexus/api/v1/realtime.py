@@ -70,10 +70,12 @@ async def realtime_endpoint(
         },
     )
 
-    # 生成响应 ID
-    response_id = f"resp_{uuid.uuid4().hex[:24]}"
-    item_id = f"item_{uuid.uuid4().hex[:24]}"
+    # 用于接收转录结果的队列
+    result_queue: asyncio.Queue = asyncio.Queue()
 
+    # 后台任务：发送转录结果
+    send_results_task: Optional[asyncio.Task] = None
+    audio: np.ndarray = np.array([], dtype=np.int16)
     session: RealtimeSession = RealtimeSession(model=model)
     servicer: RealtimeServicer = RealtimeServicer(
         grpc_addr=settings.grpc_addr, interim_results=settings.interim_results
@@ -83,11 +85,6 @@ async def realtime_endpoint(
         args=(session,),
         daemon=True,
     ).start()
-
-    # 启动后台任务：从 result_queue 读取转录结果并发送
-    send_results_task = asyncio.create_task(
-        _send_results_from_queue(websocket, session, response_id, item_id)
-    )
 
     try:
         while True:
@@ -119,20 +116,15 @@ async def realtime_endpoint(
                         audio_chunk = np.frombuffer(audio_bytes, dtype=np.int16)
                         session.audio_queue.put(audio_chunk)
                 elif event_type == "response.cancel":
-                    logger.info("Response cancelled")
-                    # 清空音频队列
-                    while not session.audio_queue.empty():
-                        try:
-                            session.audio_queue.get_nowait()
-                        except queue.Empty:
-                            break
-            else:
-                # 消息接收被取消，重新循环
-                receive_task.cancel()
-                try:
-                    await receive_task
-                except asyncio.CancelledError:
-                    pass
+                    print("Response cancelled")
+                    # # 清空音频队列
+                    # while not session.audio_queue.empty():
+                    #     try:
+                    #         session.audio_queue.get_nowait()
+                    #     except queue.Empty:
+                    #         break
+
+                    # logger.info("Response cancelled, session reset")
     except Exception as e:
         logger.exception(f"WebSocket error: {e}")
         await _send_event(
