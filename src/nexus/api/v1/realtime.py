@@ -19,6 +19,8 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from nexus.inferencers.asr.inferencer import Inferencer
 from nexus.models.transcribe import Settings
+from nexus.servicers.realtime.session import RealtimeSession
+from nexus.servicers.realtime.servicer import RealtimeServicer
 
 router = APIRouter(tags=["Realtime"])
 
@@ -74,6 +76,15 @@ async def realtime_endpoint(
     # 后台任务：发送转录结果
     send_results_task: Optional[asyncio.Task] = None
     audio: np.ndarray = np.array([], dtype=np.int16)
+    session: RealtimeSession = RealtimeSession(model=model)
+    servicer: RealtimeServicer = RealtimeServicer(
+        grpc_addr=settings.grpc_addr, interim_results=settings.interim_results
+    )
+    threading.Thread(
+        target=servicer.realtime_worker,
+        args=(session,),
+        daemon=True,
+    ).start()
 
     try:
         while True:
@@ -103,7 +114,17 @@ async def realtime_endpoint(
                     if audio_base64:
                         audio_bytes = base64.b64decode(audio_base64)
                         audio_chunk = np.frombuffer(audio_bytes, dtype=np.int16)
+                        session.audio_queue.put(audio_chunk)
+                elif event_type == "response.cancel":
+                    print("Response cancelled")
+                    # # 清空音频队列
+                    # while not session.audio_queue.empty():
+                    #     try:
+                    #         session.audio_queue.get_nowait()
+                    #     except queue.Empty:
+                    #         break
 
+                    # logger.info("Response cancelled, session reset")
     except Exception as e:
         logger.exception(f"WebSocket error: {e}")
         await _send_event(
