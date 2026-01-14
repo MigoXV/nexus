@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def request_iter(
-    streaming_config, audio_iterator, chunk_size: int = 6400
+    streaming_config, audio_iterator, chunk_size: int = 3200
 ) -> Iterator[pb2.StreamingRecognizeRequest]:
     yield pb2.StreamingRecognizeRequest(streaming_config=streaming_config)
     buffer = np.array([], dtype=np.int16)

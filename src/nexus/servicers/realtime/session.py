@@ -13,4 +13,4 @@ class RealtimeSession:
     model: str = "gpt-4o-realtime-preview"
     audio_queue: queue.Queue[np.ndarray] = field(default_factory=queue.Queue)
     result_queue: queue.Queue[str] = field(default_factory=queue.Queue)
-    sample_rate: int = 24000
+    sample_rate: int = 16000

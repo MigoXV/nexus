@@ -19,8 +19,8 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from nexus.inferencers.asr.inferencer import Inferencer
 from nexus.models.transcribe import Settings
-from nexus.servicers.realtime.session import RealtimeSession
 from nexus.servicers.realtime.servicer import RealtimeServicer
+from nexus.servicers.realtime.session import RealtimeSession
 
 router = APIRouter(tags=["Realtime"])
 
@@ -114,6 +114,8 @@ async def realtime_endpoint(
                     if audio_base64:
                         audio_bytes = base64.b64decode(audio_base64)
                         audio_chunk = np.frombuffer(audio_bytes, dtype=np.int16)
+                        audio = np.concatenate((audio, audio_chunk))
+                        sf.write("data-bin/base64_audio.wav", audio, samplerate=16000)
                         session.audio_queue.put(audio_chunk)
                 elif event_type == "response.cancel":
                     print("Response cancelled")
