@@ -3,6 +3,7 @@ Nexus CLI 应用 - Typer 入口
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 import typer
 import uvicorn
@@ -29,13 +30,10 @@ def create_fastapi_app(
     engine_config: NexusConfig,
 ) -> FastAPI:
     """创建 FastAPI 应用实例"""
-    # 配置 gRPC 地址
+    # 配置 gRPC 地址 (同步服务，可以在启动前初始化)
     transcribe_api.configure(
         grpc_addr=engine_config.asr_grpc_addr,
         interim_results=engine_config.asr_interim_results,
-    )
-    realtime_api.configure(
-        engine_config=engine_config,
     )
     # 配置 Chat API
     depends.configure_chat(
@@ -46,10 +44,25 @@ def create_fastapi_app(
         base_url=engine_config.tts_base_url, api_key=engine_config.tts_api_key
     )
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """
+        FastAPI lifespan 上下文管理器。
+        在此处初始化需要绑定到 uvicorn event loop 的异步资源（如 grpc.aio channel）。
+        """
+        # 在 uvicorn event loop 中初始化 Realtime API（包含 grpc.aio channel）
+        realtime_api.configure(engine_config=engine_config)
+        logger.info("Realtime API initialized in uvicorn event loop")
+        yield
+        # 关闭时清理资源
+        await realtime_api.shutdown()
+        logger.info("Realtime API shutdown complete")
+
     fastapi_app = FastAPI(
         title="Nexus ASR API",
         description="语音识别服务 API - 兼容 OpenAI Whisper API",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     # 注册路由
@@ -140,6 +153,8 @@ def serve(
         ssl_ca_certs=ssl_ca_certs,
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
+        ws_ping_interval=20,  # 每 20 秒发送一次 ping 保持连接
+        ws_ping_timeout=60,   # 60 秒内无 pong 响应才断开
     )
 
 

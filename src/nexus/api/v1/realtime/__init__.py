@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from .depends import configure
+from .depends import configure, shutdown
 from .endpoint import realtime_endpoint_worker
 
 router = APIRouter(tags=["Realtime"])

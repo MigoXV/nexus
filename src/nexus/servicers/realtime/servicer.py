@@ -1,55 +1,25 @@
+import json
 import logging
-import threading
-import time
-from collections.abc import Iterable
-from typing import Iterator, List, Optional
+from typing import List, Optional
 
-import numpy as np
+from fastapi import WebSocket
 from openai.types.realtime.realtime_function_tool import RealtimeFunctionTool
 
-from nexus.inferencers.asr.inferencer import Inferencer
-from nexus.inferencers.chat.inferencer import Inferencer as ChatInferencer
+from nexus.inferencers.asr.inferencer import AsyncInferencer
+from nexus.inferencers.chat.inferencer import AsyncInferencer as AsyncChatInferencer
 from nexus.inferencers.tts.inferencer import Inferencer as TTSInferencer
-from nexus.inferencers.tts.text_normalizer import split_text_by_punctuation
-from nexus.sessions import ChatSession, RealtimeSession
+from nexus.sessions import RealtimeSession
+from nexus.sessions.chat_session import AsyncChatSession
 
-from .build_events import (
-    build_input_audio_transcription_completed,
-    build_response_text_done,
-    build_response_text_delta,
+from .send_responses import (
+    send_transcribe_response,
+    process_chat_stream,
+    send_tool_result_response,
+    send_text_response,
 )
+from .contexts import McpCallResponseContext
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """你是一个有帮助的助手。根据用户提供的语音内容，生成简洁明了的回答。"""
-
-# TTS 音频分片大小 (pcm16 @ 24kHz, ~80ms per chunk)
-TTS_CHUNK_SIZE = 3840  # 24000 * 0.08 * 2 bytes
-
-# 淡入淡出参数 (采样点数, 24kHz下约5ms)
-FADE_SAMPLES = 120
-
-
-def apply_fade_in(audio: np.ndarray, fade_samples: int = FADE_SAMPLES) -> np.ndarray:
-    """对音频块应用淡入效果（在线处理）"""
-    if len(audio) == 0:
-        return audio
-    fade_len = min(fade_samples, len(audio))
-    fade_curve = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
-    audio = audio.astype(np.float32)
-    audio[:fade_len] *= fade_curve
-    return audio.astype(np.int16)
-
-
-def apply_fade_out(audio: np.ndarray, fade_samples: int = FADE_SAMPLES) -> np.ndarray:
-    """对音频块应用淡出效果（在线处理）"""
-    if len(audio) == 0:
-        return audio
-    fade_len = min(fade_samples, len(audio))
-    fade_curve = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
-    audio = audio.astype(np.float32)
-    audio[-fade_len:] *= fade_curve
-    return audio.astype(np.int16)
 
 
 class RealtimeServicer:
@@ -64,9 +34,9 @@ class RealtimeServicer:
     ):
         self.grpc_addr = grpc_addr
         self.interim_results = interim_results
-        self.inferencer = Inferencer(self.grpc_addr)
+        self.inferencer = AsyncInferencer(self.grpc_addr)
         self.chat_inferencer = (
-            ChatInferencer(api_key=chat_api_key, base_url=chat_base_url)
+            AsyncChatInferencer(api_key=chat_api_key, base_url=chat_base_url)
             if chat_api_key
             else None
         )
@@ -76,217 +46,206 @@ class RealtimeServicer:
             else None
         )
 
+    async def close(self):
+        """关闭所有资源"""
+        if self.inferencer:
+            await self.inferencer.close()
+            logger.info("ASR inferencer closed")
+        if self.chat_inferencer:
+            await self.chat_inferencer.close()
+            logger.info("Chat inferencer closed")
+
     def create_realtime_session(
         self,
+        websocket: WebSocket,
         output_modalities: List[str],
         tools: List[RealtimeFunctionTool],
         chat_model: str,
     ) -> RealtimeSession:
-        chat_session = ChatSession(chat_inferencer=self.chat_inferencer)
+        chat_session = AsyncChatSession(chat_inferencer=self.chat_inferencer)
         return RealtimeSession(
             chat_session=chat_session,
             chat_model=chat_model,
+            websocket=websocket,
             output_modalities=output_modalities,
             tools=tools,
         )
 
-    def realtime_worker(
-        self, session: RealtimeSession, is_chat: bool = False
-    ) -> Iterable[str]:
-        """后台工作线程，将转录结果放入 result_queue"""
-        audio_iterator = self._audio_iterator(session)
-        for asr_result in self.inferencer.transcribe(
-            audio_iterator,
+    async def realtime_worker(self, session: RealtimeSession, is_chat: bool = False):
+        """异步后台工作协程，直接发送结果到 WebSocket"""
+        import asyncio
+        
+        # 直接使用异步 ASR 转录
+        async for asr_result in self.inferencer.transcribe(
+            session.audio_iter(),
             sample_rate=session.sample_rate,
             interim_results=self.interim_results,
         ):
-            transcript = asr_result.transcript
-            is_final = asr_result.is_final
-            if not is_final or not transcript.strip():
-                continue
-            session.result_queue.put(
-                build_input_audio_transcription_completed(transcript)
-            )
-            logger.info(f"Transcript: {transcript}")
+            try:
+                await send_transcribe_response(session, asr_result)
+            except Exception as e:
+                logger.error(f"Error sending transcribe response: {e}")
             # 未配置对话功能，不返回对话结果
             if not is_chat:
                 continue
-            chat_stream_resp = session.chat(transcript + " /no_think")
-            output_text = ""
-            for resp_chunk in chat_stream_resp:
-                if isinstance(resp_chunk, str):
-                    output_text += resp_chunk
-                    resp_chunk = build_response_text_delta(resp_chunk)
-                session.result_queue.put(resp_chunk)
-            session.result_queue.put(build_response_text_done(output_text))
-            logger.info(f"Chat response done: {output_text}")
+            
+            # 检查是否有正在进行的 chat 任务，如果有则先取消
+            current_task = session.get_current_chat_task()
+            if current_task is not None and not current_task.done():
+                logger.info(
+                    f"New transcription received, cancelling current chat task"
+                )
+                session.request_cancel()  # 设置取消标志
+                current_task.cancel()  # 真正取消任务
+                try:
+                    await current_task  # 等待任务被取消
+                except asyncio.CancelledError:
+                    logger.info("Chat task was cancelled successfully")
+                except Exception as e:
+                    logger.warning(f"Error waiting for cancelled chat task: {e}")
+            
+            # 重置取消状态，准备新的 chat
+            session.reset_cancel()
+            
+            # 创建新的 chat 任务
+            chat_task = asyncio.create_task(
+                self.chat_worker(session, asr_result.transcript)
+            )
+            session.set_current_chat_task(chat_task)
+            
+            # 不等待任务完成，让它在后台运行
+            # 这样新的转写事件可以立即触发取消
 
-    def use_tool(self, session: RealtimeSession, tool_call_id: str, content: str):
-        chat_stream_resp = session.use_tool(tool_call_id=tool_call_id, content=content)
-        output_text = ""
-        for resp_chunk in chat_stream_resp:
-            if isinstance(resp_chunk, str):
-                output_text += resp_chunk
-                resp_chunk = build_response_text_delta(resp_chunk)
-            session.result_queue.put(resp_chunk)
-        session.result_queue.put(build_response_text_done(output_text))
-        logger.info(f"Chat response done: {output_text}")
-
-    def process_chat_response(
+    async def chat_worker(self, session: RealtimeSession, user_message: str):
+        """
+        处理聊天请求，流式发送响应并检测工具调用。
+        
+        工作流程：
+        1. 获取 session 的 chat 流
+        2. 使用 process_chat_stream 流式处理，
+           文本会立即发送给客户端（降低首字延迟）
+        3. 如果检测到 MCP 工具调用，在服务端执行调用，
+           将结果添加到对话历史后自动继续生成响应
+        4. 如果检测到普通 function call，事件已在处理过程中发送，
+           等待客户端 response.create
+        """
+        chat_stream = session.chat(user_message)
+        result = await process_chat_stream(session, chat_stream)
+        
+        if result.has_mcp_call:
+            # MCP 工具调用：服务端执行
+            await self._execute_mcp_call(session, result.tool_call)
+        elif result.has_tool_call:
+            # 普通 function call：等待客户端返回结果
+            logger.info(
+                f"Function call sent: {result.tool_call.name}, "
+                f"waiting for client to send tool result and response.create"
+            )
+    
+    async def _execute_mcp_call(
         self,
         session: RealtimeSession,
-        transcript: str,
+        tool_call,
     ):
-        pass
-
-    def _process_chat_response(
-        self,
-        session: RealtimeSession,
-        transcript: str,
-        response_id: str,
-        item_id: str,
-        has_audio_output: bool,
-    ):
-        """处理 Chat 响应，支持文本和音频输出"""
-        # 重置 TTS 取消标志
-        session.reset_tts_cancel()
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": transcript + " /no_think"},
-        ]
-
-        # 流式获取 Chat 响应
-        text_buffer = ""
-        full_response = ""
-
-        for chunk in self.chat_inferencer.chat_stream(
-            messages=messages,
-            # model=CHAT_MODEL,
-            max_tokens=512,
-        ):
-            # 检查是否被打断
-            if session.tts_cancel_event.is_set():
-                logger.info("Chat response cancelled due to interruption")
-                break
-
-            # 清理 think 标签
-            chunk = chunk.replace("<think>", "").replace("</think>", "")
-            if not chunk:
-                continue
-
-            text_buffer += chunk
-            full_response += chunk
-
-            # 按标点分句，发送完整句子
-            sentences = split_text_by_punctuation(text_buffer)
-            if len(sentences) > 1:
-                # 有完整的句子，发送文本并送入 TTS
-                for sentence in sentences[:-1]:
-                    if session.tts_cancel_event.is_set():
-                        break
-                    # 发送完整句子的文本
-                    session.result_queue.put((sentence, False))
-                    # 如果需要音频输出，送入 TTS
-                    if has_audio_output and self.tts_inferencer:
-                        self._tts_sentence(session, sentence)
-                # 保留未完成的部分
-                text_buffer = sentences[-1] if sentences else ""
-            elif len(sentences) == 1 and text_buffer.endswith(tuple("。！？.!?；;")):
-                # 单个完整句子
-                session.result_queue.put((sentences[0], False))
-                if has_audio_output and self.tts_inferencer:
-                    self._tts_sentence(session, sentences[0])
-                text_buffer = ""
-
-        # 处理剩余的文本
-        if text_buffer.strip():
-            if not session.tts_cancel_event.is_set():
-                # 发送剩余文本
-                session.result_queue.put((text_buffer.strip(), False))
-                if has_audio_output and self.tts_inferencer:
-                    self._tts_sentence(session, text_buffer.strip(), is_last=True)
-
-        # 发送最终标记
-        if not session.tts_cancel_event.is_set():
-            session.result_queue.put(("", True))
-            if has_audio_output:
-                # 发送音频结束标记
-                session.tts_audio_queue.put((b"", True))
-
-        logger.info(f"Chat response: {full_response}")
-
-    def _tts_sentence(self, session: RealtimeSession, text: str, is_last: bool = False):
-        """将一个句子转换为 TTS 音频并放入队列，带淡入淡出"""
-        if not text.strip() or not self.tts_inferencer:
+        """
+        执行 MCP 工具调用并发送后续事件。
+        
+        MCP 调用在服务端执行，完成后：
+        1. 执行实际的 MCP 工具调用
+        2. 通过 mcp_ctx 发送 mcp_call.completed 事件
+        3. 发送 conversation.item.done 和 output_item.done 事件
+        4. 将结果添加到对话历史
+        5. 自动继续生成响应
+        """
+        tool_name = tool_call.name
+        server_label = tool_call.server_label
+        arguments_str = tool_call.arguments
+        mcp_ctx = tool_call.mcp_ctx
+        
+        if not mcp_ctx:
+            logger.error(f"MCP context not found for tool call: {tool_name}")
             return
-
-        logger.info(f"TTS for sentence: {text}")
-        session.set_tts_streaming(True)
-
+        
+        logger.info(f"Executing MCP call: {tool_name} on {server_label}")
+        
+        # 解析参数
         try:
-            # 使用 pcm 格式以便直接播放
-            audio_buffer = b""
-            is_first_chunk = True
-            chunks_to_send = []  # 缓存块以便对最后一块做淡出
-
-            for audio_chunk in self.tts_inferencer.speech_stream(
-                input=text,
-                model="tts-1",
-                voice="rita",
-                response_format="wav",  # 24kHz, 16-bit, mono
-            ):
-                # 检查是否被打断
-                if session.tts_cancel_event.is_set():
-                    logger.info(f"TTS cancelled for: {text}")
-                    break
-
-                audio_buffer += audio_chunk
-
-                # 分片发送，略小于完整 TTS 块以便打断
-                while len(audio_buffer) >= TTS_CHUNK_SIZE:
-                    chunk_bytes = audio_buffer[:TTS_CHUNK_SIZE]
-                    audio_buffer = audio_buffer[TTS_CHUNK_SIZE:]
-
-                    # 转换为numpy数组处理
-                    chunk_array = np.frombuffer(chunk_bytes, dtype=np.int16).copy()
-
-                    # 对第一个块应用淡入
-                    if is_first_chunk:
-                        chunk_array = apply_fade_in(chunk_array)
-                        is_first_chunk = False
-
-                    # 先发送上一个缓存的块（不是最后一块）
-                    if chunks_to_send:
-                        session.tts_audio_queue.put((chunks_to_send.pop(0), False))
-
-                    # 缓存当前块（可能是最后一块，需要淡出）
-                    chunks_to_send.append(chunk_array.tobytes())
-
-            # 处理剩余的音频
-            if audio_buffer and not session.tts_cancel_event.is_set():
-                chunk_array = np.frombuffer(audio_buffer, dtype=np.int16).copy()
-                if is_first_chunk:
-                    chunk_array = apply_fade_in(chunk_array)
-                # 缓存当前块
-                if chunks_to_send:
-                    session.tts_audio_queue.put((chunks_to_send.pop(0), False))
-                chunks_to_send.append(chunk_array.tobytes())
-
-            # 发送最后一个块，带淡出
-            if chunks_to_send and not session.tts_cancel_event.is_set():
-                last_chunk = np.frombuffer(chunks_to_send[0], dtype=np.int16).copy()
-                last_chunk = apply_fade_out(last_chunk)
-                session.tts_audio_queue.put((last_chunk.tobytes(), is_last))
-
+            arguments = json.loads(arguments_str) if arguments_str else {}
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse MCP call arguments: {e}")
+            arguments = {}
+        
+        try:
+            # 执行 MCP 调用
+            output = await session.mcp_registry.call_tool(tool_name, arguments)
+            mcp_ctx.set_output(output)
+            
+            # 添加工具调用到对话历史（作为 assistant 的工具调用）
+            # 首先添加 assistant 的工具调用消息
+            assistant_msg = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": mcp_ctx.item_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": arguments_str,
+                    }
+                }]
+            }
+            session.chat_session.chat_history.append(assistant_msg)
+            
+            # 然后添加工具结果
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": mcp_ctx.item_id,
+                "content": output,
+            }
+            session.chat_session.chat_history.append(tool_msg)
+            
+            logger.info(
+                f"MCP call {tool_name} completed, output length: {len(output)}"
+            )
+            
         except Exception as e:
-            logger.error(f"TTS error: {e}")
-        finally:
-            session.set_tts_streaming(False)
+            logger.error(f"MCP call {tool_name} failed: {e}")
+            mcp_ctx.set_error(str(e))
+            
+            # 添加错误到对话历史
+            assistant_msg = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": mcp_ctx.item_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": arguments_str,
+                    }
+                }]
+            }
+            session.chat_session.chat_history.append(assistant_msg)
+            
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": mcp_ctx.item_id,
+                "content": f"Error: {e}",
+            }
+            session.chat_session.chat_history.append(tool_msg)
+        
+        # 发送 MCP 调用完成事件（completed, item.done, output_item.done）
+        await mcp_ctx.__aexit__(None, None, None)
+        
+        # 不自动生成响应，等待客户端发送 response.create 事件
+        # 工具调用结果已保存在历史记录中，客户端可以选择何时继续对话
+        logger.info(f"MCP call completed, waiting for client response.create event")
 
-    def _audio_iterator(self, session: RealtimeSession) -> Iterable[np.ndarray]:
-        while True:
-            chunk: np.ndarray = session.audio_queue.get()
-            if chunk is None:
-                break
-            yield chunk
+    async def generate_response(self, session: RealtimeSession):
+        """
+        基于当前对话历史生成响应。
+        由客户端 response.create 事件触发调用。
+        """
+        chat_stream = session.continue_conversation()
+        await send_tool_result_response(session, chat_stream)
+        logger.info("Response generated based on conversation history")

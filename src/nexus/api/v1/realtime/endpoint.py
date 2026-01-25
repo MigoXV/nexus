@@ -7,31 +7,24 @@ import asyncio
 import base64
 import json
 import logging
-import queue
-import threading
-import uuid
-from typing import Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 from fastapi import Depends, Query, WebSocket, WebSocketDisconnect
 from openai.types.realtime import RealtimeFunctionTool
 from nexus.servicers.realtime.build_events import (
     build_error_event,
-    build_response_audio_delta,
-    build_response_audio_done,
-    build_response_done,
     build_session_created,
-    build_session_updated,
 )
 from nexus.servicers.realtime.servicer import RealtimeServicer
+from nexus.servicers.realtime.contexts import McpListToolsContext
 from nexus.sessions import RealtimeSession
+from nexus.mcp import McpServerConfig
 
 from .depends import get_realtime_servicer
+from .event_routes import handle_session_event
 
 logger = logging.getLogger(__name__)
-
-
-TTS_SEND_INTERVAL = 0.01  # 10ms
 
 
 async def realtime_endpoint_worker(
@@ -55,16 +48,25 @@ async def realtime_endpoint_worker(
         )
         await websocket.close()
         return
+    update_event["type"] = "session.updated"
+    await _send_event(websocket, update_event)  # 回显配置事件
+    
+    # 解析工具配置（分离普通工具和 MCP 配置）
+    raw_tools = update_event.get("session", {}).get("tools", [])
+    function_tools, mcp_configs = _parse_tools_config(raw_tools)
+    
+    if function_tools:
+        logger.info(f"Initializing session with {len(function_tools)} function tools")
+    if mcp_configs:
+        logger.info(f"Initializing session with {len(mcp_configs)} MCP servers")
+    
     # 初始化 RealtimeSession
-    tools = update_event.get("session", {}).get("tools", [])
-    if tools:
-        logger.info(f"Initializing session with tools: {tools}")
-        tools = [RealtimeFunctionTool(**tool) for tool in tools]
     realtime_session = realtime_servicer.create_realtime_session(
+        websocket=websocket,
         output_modalities=update_event.get("session", {}).get(
             "output_modalities", ["text"]
         ),
-        tools=tools,
+        tools=function_tools,
         chat_model=model,
     )
 
@@ -72,82 +74,67 @@ async def realtime_endpoint_worker(
         websocket,
         build_session_created(realtime_session.session_id, model),
     )
-    # 启动后台工作线程
-    threading.Thread(
-        target=realtime_servicer.realtime_worker,
-        args=(realtime_session, is_chat_model),
-        daemon=True,
-    ).start()
-    # 启动异步任务：从 result_queue 读取结果并发送
-    send_results_task = asyncio.create_task(_send_results(websocket, realtime_session))
-    # 启动异步任务：从 tts_audio_queue 读取音频并发送
-    send_audio_task = asyncio.create_task(
-        _send_audio_results(websocket, realtime_session)
+    
+    # 注册 MCP 服务器并获取工具列表
+    for mcp_config in mcp_configs:
+        try:
+            await _register_mcp_server(realtime_session, mcp_config)
+        except Exception as e:
+            logger.error(f"Failed to register MCP server {mcp_config.server_label}: {e}")
+            # 发送错误事件但不中断会话
+            await _send_event(
+                websocket,
+                build_error_event(
+                    "mcp_connection_error",
+                    f"Failed to connect to MCP server {mcp_config.server_label}: {e}"
+                ),
+            )
+            # 继续处理其他 MCP 服务器，不 re-raise
+    
+    # 启动异步后台工作任务
+    worker_task = asyncio.create_task(
+        realtime_servicer.realtime_worker(realtime_session, is_chat_model)
     )
 
     try:
         while True:
-            # 同时处理：接收消息 和 发送转录结果
-            receive_task = asyncio.create_task(websocket.receive_text())
-            # 构建等待任务列表
-            pending_tasks = {receive_task}
-            if send_results_task and not send_results_task.done():
-                pending_tasks.add(send_results_task)
-            if send_audio_task and not send_audio_task.done():
-                pending_tasks.add(send_audio_task)
-            # 同时等待消息和发送结果
-            done, pending = await asyncio.wait(
-                pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            # 检查发送任务是否完成
-            if send_results_task in done:
-                send_results_task = None
-            if send_audio_task in done:
-                send_audio_task = None
-            # 检查是否收到消息
-            if receive_task in done:
-                data = receive_task.result()
-                event = json.loads(data)
-                event_type = event.get("type", "")
-                logger.debug(f"Received event: {event_type}")
-                if event_type == "input_audio_buffer.append":
-                    # 追加音频数据到队列
-                    audio_base64 = event.get("audio", "")
-                    if audio_base64:
-                        audio_bytes = base64.b64decode(audio_base64)
-                        audio_chunk = np.frombuffer(audio_bytes, dtype=np.int16)
-                        realtime_session.audio_queue.put(audio_chunk)
-                elif event_type == "session.update":
-                    session_settings = event.get("session", {})
-                    output_modalities = (
-                        session_settings.get("output_modalities", ["text"])
-                        if session_settings
-                        else ["text"]
+            # 接收客户端消息
+            data = await websocket.receive_text()
+            event = json.loads(data)
+            event_type = event.get("type", "")
+            names: List[str] = event_type.split(".")
+            logger.debug(f"Received event: {event_type}")
+            if event_type == "input_audio_buffer.append":
+                # 追加音频数据到队列
+                audio_base64 = event.get("audio", "")
+                if audio_base64:
+                    audio_bytes = base64.b64decode(audio_base64)
+                    audio_chunk = np.frombuffer(audio_bytes, dtype=np.int16)
+                    await realtime_session.audio_queue.put(audio_chunk)
+            elif names[0] == "session":
+                # 处理所有 session.* 事件
+                await handle_session_event(
+                    websocket, event, names, realtime_session, model, _send_event
+                )
+            elif event_type == "response.cancel":
+                logger.info("Response cancelled by client")
+            elif event_type == "conversation.item.create":
+                item = event.get("item", {})
+                if item.get("type", "") == "function_call_output":
+                    call_id = item["call_id"]
+                    output = item["output"]
+                    # 直接添加工具结果到对话历史
+                    realtime_session.add_tool_result(
+                        tool_call_id=call_id, 
+                        content=output
                     )
-                    realtime_session.update_output_modalities(output_modalities)
-                    logger.info(
-                        f"Session update received. output_modalities: {output_modalities}"
-                    )
-                    # 发送 session.updated 事件
-                    await _send_event(
-                        websocket,
-                        build_session_updated(
-                            realtime_session.session_id, model, output_modalities
-                        ),
-                    )
-                elif event_type == "response.cancel":
-                    logger.info("Response cancelled by client")
-                elif event_type == "conversation.item.create":
-                    item = event.get("item", {})
-                    if item.get("type", "") == "function_call_output":
-                        item_id = item["call_id"]
-                        output = item["output"]
-                        realtime_servicer.use_tool(
-                            realtime_session, tool_call_id=item_id, content=output
-                        )
-                else:
-                    logger.warning(f"Unknown event type received: {event_type}")
+            elif event_type == "response.create":
+                # 客户端显式请求响应，基于当前对话历史生成
+                asyncio.create_task(
+                    realtime_servicer.generate_response(realtime_session)
+                )
+            else:
+                logger.warning(f"Unknown event type received: {event_type}")
     except WebSocketDisconnect:
         logger.info(
             f"WebSocket disconnected for session: {realtime_session.session_id}"
@@ -158,6 +145,15 @@ async def realtime_endpoint_worker(
             websocket,
             build_error_event("server_error", str(e)),
         )
+    finally:
+        # 清理异步任务
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+        # 清理 MCP 连接
+        await realtime_session.mcp_registry.close()
 
 
 async def _send_event(websocket: WebSocket, event: dict):
@@ -184,61 +180,65 @@ async def receive_update_event(websocket: WebSocket) -> Dict:
         return None
 
 
-async def _send_results(websocket: WebSocket, session: RealtimeSession):
-    """异步任务：从 result_queue 读取转录结果并发送到 WebSocket"""
-    loop = asyncio.get_event_loop()
-    while True:
-        try:
-            # 使用 run_in_executor 异步等待同步队列
-            event = await loop.run_in_executor(
-                None, lambda: session.result_queue.get(timeout=0.1)
-            )
-            await _send_event(websocket, event)
-        except queue.Empty:
-            # 队列为空，继续等待
-            await asyncio.sleep(0.01)
-        except Exception as e:
-            logger.exception(f"Error sending transcription result: {e}")
-            break
+def _parse_tools_config(
+    raw_tools: List[Dict[str, Any]]
+) -> tuple[List[RealtimeFunctionTool], List[McpServerConfig]]:
+    """解析工具配置，分离普通工具和 MCP 配置
+    
+    Args:
+        raw_tools: 原始工具配置列表
+        
+    Returns:
+        (function_tools, mcp_configs) 元组
+    """
+    function_tools = []
+    mcp_configs = []
+    
+    for tool in raw_tools:
+        tool_type = tool.get("type", "function")
+        
+        if tool_type == "mcp":
+            # MCP 服务器配置
+            mcp_config = McpServerConfig.from_dict(tool)
+            mcp_configs.append(mcp_config)
+            logger.debug(f"Parsed MCP config: {mcp_config.server_label}")
+        else:
+            # 普通 function tool
+            function_tools.append(RealtimeFunctionTool(**tool))
+            logger.debug(f"Parsed function tool: {tool.get('name', 'unknown')}")
+    
+    return function_tools, mcp_configs
 
 
-async def _send_audio_results(websocket: WebSocket, session: RealtimeSession):
-    """异步任务：从 tts_audio_queue 读取 TTS 音频并发送到 WebSocket"""
-    loop = asyncio.get_event_loop()
-    while True:
-        try:
-            # 使用 run_in_executor 异步等待同步队列
-            audio_data, is_last = await loop.run_in_executor(
-                None, lambda: session.tts_audio_queue.get(timeout=0.1)
-            )
-
-            # 获取当前 response_id 和 item_id
-            response_id = session.current_response_id or str(uuid.uuid4())
-            item_id = session.current_item_id or str(uuid.uuid4())
-
-            if audio_data:
-                # 发送音频增量事件
-                event = build_response_audio_delta(
-                    response_id, item_id, base64.b64encode(audio_data).decode("utf-8")
-                )
-                await _send_event(websocket, event)
-
-                # 控制发送速率，略小于音频时长，便于打断
-                await asyncio.sleep(TTS_SEND_INTERVAL)
-
-            # 发送完成事件
-            if is_last:
-                await _send_event(
-                    websocket,
-                    build_response_audio_done(response_id, item_id),
-                )
-                await _send_event(
-                    websocket,
-                    build_response_done(response_id),
-                )
-        except queue.Empty:
-            # 队列为空，继续等待
-            await asyncio.sleep(0.01)
-        except Exception as e:
-            logger.exception(f"Error sending audio result: {e}")
-            break
+async def _register_mcp_server(
+    session: RealtimeSession,
+    config: McpServerConfig,
+):
+    """注册 MCP 服务器并发送相关事件
+    
+    按照 OpenAI 官方时序发送事件：
+    1. conversation.item.added (mcp_list_tools, tools=[])
+    2. mcp_list_tools.in_progress
+    3. mcp_list_tools.completed
+    4. conversation.item.done (mcp_list_tools, tools=[...])
+    """
+    async with McpListToolsContext(session, config.server_label) as ctx:
+        # 连接 MCP 服务器并获取工具列表
+        tools = await session.mcp_registry.register_server(config)
+        
+        # 转换工具为事件格式
+        tools_data = []
+        for tool in tools:
+            tools_data.append({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+                "annotations": tool.annotations,
+            })
+        
+        # 设置工具列表
+        ctx.set_tools(tools_data)
+    
+    logger.info(
+        f"Registered MCP server {config.server_label} with {len(tools)} tools"
+    )
