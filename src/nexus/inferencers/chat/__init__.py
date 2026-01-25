@@ -1,1 +1,1 @@
-from .inferencer import Inferencer
+from .inferencer import AsyncInferencer, Inferencer

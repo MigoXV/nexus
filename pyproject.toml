@@ -22,6 +22,8 @@ dependencies = [
     "openai (>=2.14.0,<3.0.0)",
     "typer (>=0.20.0,<0.21.0)",
     "websockets (>=15.0.1,<16.0.0)",
+    "omegaconf (>=2.3.0,<3.0.0)",
+    "mcp (>=1.26.0,<2.0.0)",
 ]
 
 [tool.poetry]
