@@ -7,8 +7,6 @@ import io
 import json
 from typing import Annotated, Optional
 
-import librosa
-import numpy as np
 import soundfile as sf
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -75,7 +73,6 @@ async def create_transcription(
     file: Annotated[Optional[UploadFile], File()] = None,
     model: Annotated[str, Form()] = "whisper-1",
     language: Annotated[Optional[str], Form()] = "zh-CN",
-    sample_rate: Annotated[int, Form()] = 16000,
     stream: Annotated[bool, Form()] = False,
 ):
     """
@@ -92,20 +89,10 @@ async def create_transcription(
         file_content = await file.read()
         
         # 使用 soundfile 解码音频文件（支持 wav/flac/ogg 等格式）
-        audio_data, file_sample_rate = sf.read(
+        # 后端会自动处理重采样，这里直接使用文件原始采样率
+        audio_data, sample_rate = sf.read(
             io.BytesIO(file_content), dtype="int16"
         )
-        
-        # 如果采样率不是目标采样率，进行重采样
-        if file_sample_rate != sample_rate:
-            # 转换为 float32 进行重采样
-            audio_float = audio_data.astype(np.float32) / 32768.0
-            audio_float = librosa.resample(
-                audio_float, orig_sr=file_sample_rate, target_sr=sample_rate
-            )
-            # 归一化并转换回 int16
-            audio_float = audio_float / (np.max(np.abs(audio_float)) + 1e-8)
-            audio_data = (audio_float * 32767).astype(np.int16)
         
         # 转换为 PCM bytes
         pcm_data = audio_data.tobytes()

@@ -10,7 +10,7 @@ from typing import Generator, Iterator, List, Optional
 
 import numpy as np
 
-from nexus.inferencers.asr.inferencer import Inferencer
+from nexus.inferencers.asr.inferencer import Inferencer, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -75,15 +75,15 @@ class TranscribeService:
         with Inferencer(self.grpc_addr) as inferencer:
             audio_iter = self._pcm_to_chunks(pcm_data)
 
-            for transcript, is_final in inferencer.transcribe(
+            for result in inferencer.transcribe(
                 audio=audio_iter,
                 sample_rate=sample_rate,
                 language_code=language,
                 hotwords=hotwords,
                 interim_results=self.interim_results,
             ):
-                if is_final:
-                    transcripts.append(transcript)
+                if result.is_final:
+                    transcripts.append(result.transcript)
 
         full_text = "".join(transcripts)
         return TranscriptionResult(text=full_text, language=language)
@@ -107,15 +107,15 @@ class TranscribeService:
         with Inferencer(self.grpc_addr) as inferencer:
             audio_iter = self._pcm_to_chunks(pcm_data)
 
-            for transcript, is_final in inferencer.transcribe(
+            for result in inferencer.transcribe(
                 audio=audio_iter,
                 sample_rate=sample_rate,
                 language_code=language,
                 hotwords=hotwords,
                 interim_results=self.interim_results,
             ):
-                if transcript:
-                    yield transcript
+                if result.transcript:
+                    yield result.transcript
 
     def transcribe_base64(
         self,
