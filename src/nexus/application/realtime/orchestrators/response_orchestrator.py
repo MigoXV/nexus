@@ -9,6 +9,10 @@ from openai.types.chat import ChatCompletionChunk
 
 from nexus.infrastructure.asr import TranscriptionResult
 from nexus.application.realtime.protocol.ids import event_id, item_id
+from nexus.application.realtime.text_processing import (
+    SanitizedModelOutputAccumulator,
+    prepare_realtime_user_turn,
+)
 from nexus.application.realtime.emitters.response_contexts import (
     AudioResponseContext,
     FunctionCallResponseContext,
@@ -104,6 +108,8 @@ async def send_transcribe_interim(
     session: "RealtimeSessionState",
     transcription_result: TranscriptionResult,
     tracker: TranscriptionStreamTracker,
+    *,
+    hide_metadata: bool = True,
 ) -> None:
     """Send streaming delta events for an interim (non-final) ASR result."""
 
@@ -123,7 +129,12 @@ async def send_transcribe_interim(
         tracker.mark_speech_started()
 
     # 计算增量 delta
-    delta = tracker.compute_delta(transcription_result.transcript)
+    event_transcript = (
+        prepare_realtime_user_turn(transcription_result.transcript).display_transcript
+        if hide_metadata
+        else transcription_result.transcript
+    )
+    delta = tracker.compute_delta(event_transcript)
     if not delta:
         return
 
@@ -146,6 +157,8 @@ async def send_transcribe_response(
     session: "RealtimeSessionState",
     transcription_result: TranscriptionResult,
     tracker: Optional[TranscriptionStreamTracker] = None,
+    *,
+    hide_metadata: bool = True,
 ):
     """Complete the transcription event sequence for a final ASR result.
 
@@ -164,7 +177,11 @@ async def send_transcribe_response(
         )
         return
 
-    transcript = transcription_result.transcript
+    transcript = (
+        prepare_realtime_user_turn(transcription_result.transcript).display_transcript
+        if hide_metadata
+        else transcription_result.transcript
+    )
 
     # Determine item_id – reuse from tracker if available
     if tracker is not None:
@@ -271,6 +288,8 @@ class ToolCallInfo:
 class ChatStreamResult:
     """聊天流式响应结果"""
     content: str = ""
+    raw_content: str = ""
+    tts_text: str = ""
     tool_call: Optional[ToolCallInfo] = None
     was_cancelled: bool = False  # 是否被打断
     
@@ -347,6 +366,7 @@ async def process_chat_stream(
     tool_call_id: Optional[str] = None
     is_mcp_tool: bool = False
     mcp_server_label: Optional[str] = None
+    sanitizer = SanitizedModelOutputAccumulator()
     
     try:
         async for chunk in chat_stream:
@@ -402,9 +422,14 @@ async def process_chat_stream(
             
             # 🚀 流式发送文本内容
             if delta.content:
-                result.content += delta.content
+                result.raw_content += delta.content
+                display_delta, tts_delta = sanitizer.push(delta.content)
+                result.content = sanitizer.display_text
+                result.tts_text = sanitizer.tts_text
 
                 if audio_mode:
+                    if not display_delta and not tts_delta:
+                        continue
                     if audio_ctx is None:
                         if tts_backend is None:
                             raise RuntimeError("TTS backend is not configured for audio output")
@@ -417,13 +442,15 @@ async def process_chat_stream(
                             speed=audio_output_speed,
                         )
                         await audio_ctx.__aenter__()
-                    await audio_ctx.add_model_text_delta(delta.content)
+                    await audio_ctx.add_model_text_delta(display_delta, tts_delta=tts_delta)
                 else:
+                    if not display_delta:
+                        continue
                     # 延迟创建上下文，在第一个文本到达时才发送前置事件
                     if text_ctx is None:
                         text_ctx = TextResponseContext(session, modalities=active_modalities)
                         await text_ctx.__aenter__()
-                    await text_ctx.send_text_delta(delta.content)
+                    await text_ctx.send_text_delta(display_delta)
         
         # 流结束后，如果有工具调用，记录结果
         if mcp_ctx and tool_call_id:
@@ -477,7 +504,7 @@ async def process_chat_stream(
             should_synthesize = (
                 not result.was_cancelled
                 and not result.has_tool_call
-                and bool(result.content.strip())
+                and bool(result.tts_text.strip())
             )
             if should_synthesize:
                 try:
@@ -519,6 +546,8 @@ async def process_chat_stream(
             logger.info(
                 f"Cancelled chat partial content saved to history: '{result.content}'"
             )
+        elif not result.was_cancelled and (result.raw_content or result.has_tool_call):
+            session.chat_session.replace_last_assistant_message_content(result.content)
     
     return result
 

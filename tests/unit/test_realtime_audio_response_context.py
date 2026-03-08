@@ -180,6 +180,36 @@ async def test_audio_context_duplex_backend_emits_audio_before_finish() -> None:
 
 
 @pytest.mark.asyncio
+async def test_audio_context_uses_clean_transcript_and_tts_text_separately() -> None:
+    session = CollectingSession()
+    backend = FakeDuplexBackend()
+    ctx = AudioResponseContext(
+        session=session,
+        tts_backend=backend,
+        modalities=["audio"],
+        format_type="audio/pcm",
+        voice="alloy",
+        speed=1.0,
+        tts_sample_rate=24000,
+    )
+
+    await ctx.__aenter__()
+    await ctx.add_model_text_delta("你好世界", tts_delta="你好世界。")
+    await asyncio.sleep(0)
+    await ctx.synthesize_audio()
+    await ctx.finish()
+
+    transcript_deltas = [
+        event.delta
+        for event in session.events
+        if getattr(event, "type", None) == "response.output_audio_transcript.delta"
+    ]
+
+    assert transcript_deltas == ["你好世界"]
+    assert backend.session.sent_text == ["你好世界。"]
+
+
+@pytest.mark.asyncio
 async def test_audio_context_duplex_backend_closes_on_cancel() -> None:
     session = CollectingSession()
     backend = FakeDuplexBackend()

@@ -39,6 +39,7 @@ def configure(engine_config: NexusConfig) -> None:
     realtime = RealtimeApplicationService(
         grpc_addr=engine_config.asr_grpc_addr,
         interim_results=engine_config.asr_interim_results,
+        asr_hide_metadata=engine_config.asr_hide_metadata,
         chat_base_url=engine_config.chat_base_url,
         chat_api_key=engine_config.chat_api_key,
         tts_backend=tts_backend,

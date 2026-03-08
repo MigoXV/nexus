@@ -60,6 +60,32 @@ def test_split_text_to_tts_segments_keeps_short_single_utterance() -> None:
     assert segments == [text]
 
 
+def test_split_text_to_tts_segments_caps_each_segment_at_150_chars() -> None:
+    sentence_a = "甲" * 80 + "。"
+    sentence_b = "乙" * 80 + "。"
+    segments = split_text_to_tts_segments(
+        sentence_a + sentence_b,
+        min_segment_chars=30,
+        max_segment_chars=150,
+    )
+
+    assert segments
+    assert all(len(segment) <= 150 for segment in segments)
+    assert "".join(segments) == sentence_a + sentence_b
+
+
+def test_split_text_to_tts_segments_hard_splits_single_long_sentence() -> None:
+    text = "长" * 320
+    segments = split_text_to_tts_segments(
+        text,
+        min_segment_chars=30,
+        max_segment_chars=150,
+    )
+
+    assert [len(segment) for segment in segments] == [150, 150, 20]
+    assert "".join(segments) == text
+
+
 @pytest.mark.asyncio
 async def test_stream_tts_audio_for_text_keeps_segment_order() -> None:
     segment_a = "a" * 30 + "。"

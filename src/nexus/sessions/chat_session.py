@@ -18,7 +18,35 @@ from nexus.infrastructure.chat.inferencer import (
     Inferencer as ChatInferencer,
 )
 
-DEFAULT_SYSTEM_PROMPT = "你是一个有帮助的助手。请根据用户的输入提供有用的信息。" ""
+DEFAULT_SYSTEM_PROMPT = (
+    "你是一个中文语音助手。"
+    "你的回答必须是自然口语，适合直接朗读。"
+    "只输出纯文本口语内容。"
+    "严禁输出 Markdown 代码块 标题 列表 链接 emoji 表情符号 或任何装饰性符号。"
+    "尽量不用标点和书面化表达。"
+    "如果输入里给了当前说话人的信息，只把它当作理解上下文，不要直接复述声纹标签或识别元数据。"
+)
+
+
+def _replace_assistant_message_content_in_history(
+    chat_history: List[ChatCompletionMessageParam],
+    content: str,
+) -> None:
+    for index in range(len(chat_history) - 1, -1, -1):
+        message = chat_history[index]
+        if isinstance(message, dict):
+            if message.get("role") == "assistant":
+                message["content"] = content
+                return
+            continue
+        if getattr(message, "role", None) != "assistant":
+            continue
+        chat_history[index] = ChatCompletionMessage(
+            role="assistant",
+            content=content,
+            tool_calls=getattr(message, "tool_calls", []) or [],
+        )
+        return
 
 
 @dataclass
@@ -143,6 +171,9 @@ class ChatSession:
                 )
                 self.chat_history.append(message)
 
+    def replace_last_assistant_message_content(self, content: str) -> None:
+        _replace_assistant_message_content_in_history(self.chat_history, content)
+
 
 @dataclass
 class AsyncChatSession:
@@ -266,3 +297,6 @@ class AsyncChatSession:
                     tool_calls=tool_calls,
                 )
                 self.chat_history.append(message)
+
+    def replace_last_assistant_message_content(self, content: str) -> None:
+        _replace_assistant_message_content_in_history(self.chat_history, content)

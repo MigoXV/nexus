@@ -16,6 +16,7 @@ from nexus.application.realtime.emitters.response_contexts import McpListToolsCo
 from nexus.application.realtime.orchestrators.response_orchestrator import (
     process_chat_stream,
 )
+from nexus.application.realtime.text_processing import PreparedRealtimeUserTurn
 from nexus.application.realtime.orchestrators.tool_call_orchestrator import (
     execute_mcp_tool_call,
 )
@@ -49,12 +50,14 @@ class RealtimeApplicationService:
         self,
         grpc_addr: str,
         interim_results: bool = False,
+        asr_hide_metadata: bool = True,
         chat_base_url: Optional[str] = None,
         chat_api_key: Optional[str] = None,
         tts_backend: Optional[TTSBackend] = None,
     ):
         self.grpc_addr = grpc_addr
         self.interim_results = interim_results
+        self.asr_hide_metadata = asr_hide_metadata
         self.asr_inferencer = ASRInferencer(self.grpc_addr)
         self.chat_inferencer = (
             AsyncChatInferencer(api_key=chat_api_key, base_url=chat_base_url)
@@ -180,13 +183,14 @@ class RealtimeApplicationService:
                 inferencer=self.asr_inferencer,
                 session=session,
                 interim_results=self.interim_results,
+                hide_metadata=self.asr_hide_metadata,
                 is_chat_model=is_chat_model,
                 chat_worker=self.chat_worker,
             )
         )
 
-    async def chat_worker(self, session: RealtimeSessionState, user_message: str) -> None:
-        chat_stream = session.chat(user_message)
+    async def chat_worker(self, session: RealtimeSessionState, user_turn: PreparedRealtimeUserTurn) -> None:
+        chat_stream = session.chat(user_turn)
         response_cfg = self._resolve_response_config(session)
         if "audio" in response_cfg.modalities:
             if self.tts_backend is None:

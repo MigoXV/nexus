@@ -12,6 +12,7 @@ from openai.types.chat import ChatCompletionChunk
 from openai.types.realtime.realtime_function_tool import RealtimeFunctionTool
 
 from nexus.application.realtime.protocol.tools import to_chat_tools
+from nexus.application.realtime.text_processing import PreparedRealtimeUserTurn
 from nexus.infrastructure.mcp import McpToolRegistry
 from nexus.sessions.chat_session import AsyncChatSession
 
@@ -121,9 +122,9 @@ class RealtimeSessionState:
     def get_mcp_server_for_tool(self, tool_name: str) -> Optional[str]:
         return self.mcp_registry.get_server_for_tool(tool_name)
 
-    async def chat(self, user_message: str) -> AsyncGenerator[ChatCompletionChunk, None]:
+    async def chat(self, user_turn: PreparedRealtimeUserTurn) -> AsyncGenerator[ChatCompletionChunk, None]:
         chat_stream_resp = self.chat_session.chat(
-            user_message=user_message,
+            user_message=user_turn.model_text,
             model=self.chat_model,
             stream=True,
             tools=to_chat_tools(self.get_all_tools()),

@@ -8,6 +8,7 @@ from nexus.infrastructure.tts import TTSBackend
 from nexus.infrastructure.tts.text_normalizer import normalize_for_tts, split_text_by_punctuation
 
 MIN_TTS_SEGMENT_CHARS = 30
+MAX_TTS_SEGMENT_CHARS = 150
 DEFAULT_TTS_SEGMENT_CONCURRENCY = 3
 AUDIO_CHUNK_SIZE = 4096
 
@@ -18,6 +19,7 @@ def split_text_to_tts_segments(
     text: str,
     *,
     min_segment_chars: int = MIN_TTS_SEGMENT_CHARS,
+    max_segment_chars: int = MAX_TTS_SEGMENT_CHARS,
 ) -> List[str]:
     """Split text into TTS-ready segments while enforcing a minimum length."""
     normalized = normalize_for_tts(text)
@@ -31,19 +33,36 @@ def split_text_to_tts_segments(
     for sentence in sentences:
         if not sentence:
             continue
-        current = f"{current}{sentence}" if current else sentence
-        if len(current) >= min_segment_chars:
-            segments.append(current)
-            current = ""
+        sentence_chunks = _split_sentence_by_max_chars(sentence, max_segment_chars)
+        for chunk in sentence_chunks:
+            if current and len(current) + len(chunk) > max_segment_chars:
+                segments.append(current)
+                current = ""
+            current = f"{current}{chunk}" if current else chunk
+            if len(current) >= min_segment_chars:
+                segments.append(current)
+                current = ""
 
     if current:
-        if segments:
-            segments[-1] += current
+        if segments and len(segments[-1]) < min_segment_chars:
+            merged = f"{segments[-1]}{current}"
+            if len(merged) <= max_segment_chars:
+                segments[-1] = merged
+            else:
+                segments.append(current)
         else:
-            # Single short utterance should still be synthesized.
             segments.append(current)
 
     return [segment for segment in segments if segment]
+
+
+def _split_sentence_by_max_chars(sentence: str, max_segment_chars: int) -> List[str]:
+    if max_segment_chars <= 0 or len(sentence) <= max_segment_chars:
+        return [sentence]
+    return [
+        sentence[index : index + max_segment_chars]
+        for index in range(0, len(sentence), max_segment_chars)
+    ]
 
 
 def realtime_audio_format_to_tts_response_format(format_type: str) -> str:
@@ -85,6 +104,7 @@ async def stream_tts_audio_for_text(
     format_type: str,
     send_chunk: Callable[[bytes], Awaitable[None]],
     min_segment_chars: int = MIN_TTS_SEGMENT_CHARS,
+    max_segment_chars: int = MAX_TTS_SEGMENT_CHARS,
     concurrency: int = DEFAULT_TTS_SEGMENT_CONCURRENCY,
 ) -> None:
     """Synthesize text in parallel segments and stream chunks in order.
@@ -94,7 +114,11 @@ async def stream_tts_audio_for_text(
     Within each segment, chunks are streamed as soon as they arrive from
     the TTS backend — no buffering of the entire segment.
     """
-    segments = split_text_to_tts_segments(text, min_segment_chars=min_segment_chars)
+    segments = split_text_to_tts_segments(
+        text,
+        min_segment_chars=min_segment_chars,
+        max_segment_chars=max_segment_chars,
+    )
     if not segments:
         return
 

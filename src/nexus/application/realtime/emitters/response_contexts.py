@@ -292,7 +292,8 @@ class AudioResponseContext:
         self.response_id = response_id()
         self.conversation_id = conversation_id()
 
-        self._content = ""
+        self._display_text = ""
+        self._tts_text = ""
         self._item = None
         self._audio_delta_count = 0
         self._duplex_session: "DuplexTTSSession | None" = None
@@ -325,7 +326,11 @@ class AudioResponseContext:
 
     @property
     def content(self) -> str:
-        return self._content
+        return self._display_text
+
+    @property
+    def tts_content(self) -> str:
+        return self._tts_text
 
     async def __aenter__(self) -> "AudioResponseContext":
         await self.session.send_event(
@@ -372,13 +377,17 @@ class AudioResponseContext:
         await self.finish(cancelled=False)
         return False
 
-    async def add_model_text_delta(self, delta: str) -> None:
-        if not delta:
+    async def add_model_text_delta(self, delta: str, *, tts_delta: str | None = None) -> None:
+        if not delta and not tts_delta:
             return
-        self._content += delta
-        if self._duplex_session is not None:
-            await self._duplex_session.send_text(delta)
-        if not self.include_transcript:
+        tts_delta = delta if tts_delta is None else tts_delta
+        if delta:
+            self._display_text += delta
+        if tts_delta:
+            self._tts_text += tts_delta
+        if self._duplex_session is not None and tts_delta:
+            await self._duplex_session.send_text(tts_delta)
+        if not self.include_transcript or not delta:
             return
         if self._audio_started:
             await self._emit_transcript_delta(delta)
@@ -435,7 +444,7 @@ class AudioResponseContext:
             await self._send_audio_raw(audio_bytes)
 
     async def synthesize_audio(self) -> None:
-        if not self._content.strip():
+        if not self._tts_text.strip():
             return
         if self._duplex_session is not None:
             await self._duplex_session.end_input()
@@ -449,7 +458,7 @@ class AudioResponseContext:
 
         await stream_tts_audio_for_text(
             backend=self.tts_backend,
-            text=self._content,
+            text=self._tts_text,
             voice=self.voice,
             speed=self.speed,
             format_type=self.format_type,
@@ -484,7 +493,7 @@ class AudioResponseContext:
             )
         )
 
-        transcript = self._content if self.include_transcript and self._audio_started else None
+        transcript = self._display_text if self.include_transcript and self._audio_started else None
         if transcript is not None:
             await self.session.send_event(
                 build_audio_transcript_done_event(
@@ -548,7 +557,7 @@ class AudioResponseContext:
                 "AudioResponseContext failed: item_id=%s response_id=%s content_len=%s deltas=%s",
                 self.item_id,
                 self.response_id,
-                len(self._content),
+                len(self._display_text),
                 self._audio_delta_count,
             )
             return
@@ -573,7 +582,7 @@ class AudioResponseContext:
                 "AudioResponseContext cancelled: item_id=%s response_id=%s content_len=%s deltas=%s",
                 self.item_id,
                 self.response_id,
-                len(self._content),
+                len(self._display_text),
                 self._audio_delta_count,
             )
             return
@@ -590,7 +599,7 @@ class AudioResponseContext:
             "AudioResponseContext completed: item_id=%s response_id=%s content_len=%s deltas=%s",
             self.item_id,
             self.response_id,
-            len(self._content),
+            len(self._display_text),
             self._audio_delta_count,
         )
 

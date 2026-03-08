@@ -19,6 +19,7 @@ class NexusConfig:
     tts_grpc_decoder_chunk_size: int = 50
     tts_grpc_text_chunk_size: int = 1
     asr_interim_results: bool = True
+    asr_hide_metadata: bool = True
 
     def __post_init__(self) -> None:
         self.tts_backend = self.tts_backend.lower()
