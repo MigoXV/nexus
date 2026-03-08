@@ -2424,37 +2424,6 @@ url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 reference = "tuna"
 
 [[package]]
-name = "samplerate"
-version = "0.2.3"
-description = "Monolithic python wrapper for libsamplerate based on pybind11 and NumPy"
-optional = false
-python-versions = ">=3.7"
-groups = ["main"]
-files = [
-    {file = "samplerate-0.2.3-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:0eef3bb952b7c50297a911f0c5df68ffb03bc91b8161dc7fc1e73360f1714517"},
-    {file = "samplerate-0.2.3-cp310-cp310-win_amd64.whl", hash = "sha256:e0872e87faeab46e63aadb8390d8a3288c797afb3e37a2bdcd3c7a1b9c8fd08c"},
-    {file = "samplerate-0.2.3-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:f31e47cab7714932ba2b2fe65cede94062233e0aa84ceba4785d4187f9ee532e"},
-    {file = "samplerate-0.2.3-cp311-cp311-win_amd64.whl", hash = "sha256:0e5748685ca4e7501561d66c3fc0c38af0dba57aa788fed698bfaafde1c9e87c"},
-    {file = "samplerate-0.2.3-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:c1734ef6de0c1b5af0b7d43af89e3ace66c91b2b0c466f62cbffd297cb57f870"},
-    {file = "samplerate-0.2.3-cp312-cp312-win_amd64.whl", hash = "sha256:8322bee1d38358c6f9eda4cc11020ce0462442355d438da470f668f2b1b468bd"},
-    {file = "samplerate-0.2.3-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:4d594028410487c864e7cbbcb6e0d154bdf12674969e7bd9844fc5cb9079fdb5"},
-    {file = "samplerate-0.2.3-cp313-cp313-win_amd64.whl", hash = "sha256:41e6d09fc2a36ce7f6a26300d3abaffc58dc52f6fe53b2d2b8fc6af2c3aad470"},
-    {file = "samplerate-0.2.3-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:e1ca8b7b77f8b3e47e2690abe323440dc171aa9d22f71f0239f96d26e0f7d396"},
-    {file = "samplerate-0.2.3-cp314-cp314-win_amd64.whl", hash = "sha256:7826a1f1038b04e1ec29df08a0743fd5ed07c01e48e7d69508c23980ec281da0"},
-    {file = "samplerate-0.2.3-cp39-cp39-macosx_10_9_universal2.whl", hash = "sha256:c20823f715e6c925fa58af8145f97a1a9f3c480aaacf402be710fbf5a4f93914"},
-    {file = "samplerate-0.2.3-cp39-cp39-win_amd64.whl", hash = "sha256:f7420d1efcb6a4c9955cd82dc4bcf997c1e2aedf7fe64670297a66aba1bcdb47"},
-    {file = "samplerate-0.2.3.tar.gz", hash = "sha256:8da3726c4886946a8da16a08cb2c820b6b6b06ee8262673def72be846b3f3412"},
-]
-
-[package.dependencies]
-numpy = "*"
-
-[package.source]
-type = "legacy"
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-reference = "tuna"
-
-[[package]]
 name = "scikit-learn"
 version = "1.7.2"
 description = "A set of python modules for machine learning and data mining"
@@ -3072,4 +3041,4 @@ reference = "tuna"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "0371324f8bfdbfe2352e8863a82af795ebe5651258719e9af4c5c6da5b2f65cf"
+content-hash = "e5d2e9cc820a5e5a59640f2a9bdee7f9866fa40aa08e5c64a072d700e36f90f1"

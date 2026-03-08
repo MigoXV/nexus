@@ -5,13 +5,14 @@ FROM registry.cn-hangzhou.aliyuncs.com/migo-dl/python:3.10.18-poetry-0-4-1
 WORKDIR /app
 
 # 拷贝必要的文件以安装依赖
+COPY wheels/ ./wheels/
 COPY pyproject.toml poetry.lock README.md ./
 
 # 安装依赖
 RUN mkdir -p src/nexus && \
     touch src/nexus/__init__.py && \
     poetry install --no-root
-
+RUN poetry run pip install ./wheels/samplerate-0.2.3-cp310-cp310-linux_x86_64.whl
 # 拷贝 pyproject.toml 和 poetry.lock 文件
 COPY . .
 

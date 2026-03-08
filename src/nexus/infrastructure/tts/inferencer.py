@@ -3,11 +3,13 @@ from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
 
+from .backend import TTSBackend
+
 
 logger = logging.getLogger(__name__)
 
 
-class Inferencer:
+class OpenAITTSBackend(TTSBackend):
     """
     TTS 推理器，封装 OpenAI 兼容的 Text-to-Speech API 调用（全异步模式）。
     """
@@ -27,7 +29,7 @@ class Inferencer:
 
     async def speech(
         self,
-        input: str,
+        text: str,
         model: str = "miratts-llmfront",
         voice: str = "rita",
         response_format: str = "wav",
@@ -47,7 +49,7 @@ class Inferencer:
         try:
             params = {
                 "model": model,
-                "input": input,
+                "input": text,
                 "voice": voice,
                 "response_format": response_format,
                 "speed": speed,
@@ -62,7 +64,7 @@ class Inferencer:
 
     async def speech_stream(
         self,
-        input: str,
+        text: str,
         model: str = "miratts-llmfront",
         voice: str = "rita",
         response_format: str = "wav",
@@ -82,7 +84,7 @@ class Inferencer:
         try:
             params = {
                 "model": model,
-                "input": input,
+                "input": text,
                 "voice": voice,
                 "response_format": response_format,
                 "speed": speed,
@@ -109,3 +111,6 @@ class Inferencer:
         """关闭客户端连接。"""
         if hasattr(self.client, "close"):
             await self.client.close()
+
+
+Inferencer = OpenAITTSBackend

@@ -276,6 +276,64 @@ class TestSendTranscribeResponseWithTracker:
         assert "conversation.item.input_audio_transcription.completed" in types
 
     @pytest.mark.asyncio
+    async def test_final_transcript_strips_sid_prefix_from_client_events(self):
+        session = FakeSession()
+        tracker = TranscriptionStreamTracker()
+
+        await send_transcribe_response(
+            session,
+            _make_result("<sid migo 0.56> 来给我讲个故事", True, [("来给我讲个故事", 0.0, 0.5)]),
+            tracker,
+        )
+
+        delta_events = [
+            e for e in session.events
+            if e.type == "conversation.item.input_audio_transcription.delta"
+        ]
+        completed_events = [
+            e for e in session.events
+            if e.type == "conversation.item.input_audio_transcription.completed"
+        ]
+
+        assert delta_events[0].delta == "来给我讲个故事"
+        assert completed_events[0].transcript == "来给我讲个故事"
+
+    @pytest.mark.asyncio
+    async def test_others_sid_prefix_is_ignored_for_client_transcript(self):
+        session = FakeSession()
+        tracker = TranscriptionStreamTracker()
+
+        await send_transcribe_response(
+            session,
+            _make_result("<sid <others>> 你好", True, [("你好", 0.0, 0.5)]),
+            tracker,
+        )
+
+        completed_events = [
+            e for e in session.events
+            if e.type == "conversation.item.input_audio_transcription.completed"
+        ]
+        assert completed_events[0].transcript == "你好"
+
+    @pytest.mark.asyncio
+    async def test_hide_metadata_false_keeps_sid_prefix_for_client_transcript(self):
+        session = FakeSession()
+        tracker = TranscriptionStreamTracker()
+
+        await send_transcribe_response(
+            session,
+            _make_result("<sid migo 0.56> 来给我讲个故事", True, [("来给我讲个故事", 0.0, 0.5)]),
+            tracker,
+            hide_metadata=False,
+        )
+
+        completed_events = [
+            e for e in session.events
+            if e.type == "conversation.item.input_audio_transcription.completed"
+        ]
+        assert completed_events[0].transcript == "<sid migo 0.56> 来给我讲个故事"
+
+    @pytest.mark.asyncio
     async def test_item_id_consistent_interim_to_final(self):
         """item_id should be the same across interim deltas and final events."""
         session = FakeSession()

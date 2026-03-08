@@ -16,6 +16,7 @@ from nexus.application.realtime.emitters.response_contexts import McpListToolsCo
 from nexus.application.realtime.orchestrators.response_orchestrator import (
     process_chat_stream,
 )
+from nexus.application.realtime.text_processing import PreparedRealtimeUserTurn
 from nexus.application.realtime.orchestrators.tool_call_orchestrator import (
     execute_mcp_tool_call,
 )
@@ -26,7 +27,7 @@ from nexus.application.realtime.protocol.ids import event_id
 from nexus.domain.realtime import RealtimeSessionState
 from nexus.infrastructure.asr import AsyncInferencer as ASRInferencer
 from nexus.infrastructure.chat import AsyncInferencer as AsyncChatInferencer
-from nexus.infrastructure.tts import Inferencer as TTSInferencer
+from nexus.infrastructure.tts import TTSBackend
 from nexus.infrastructure.mcp import McpServerConfig
 from nexus.sessions.chat_session import AsyncChatSession
 
@@ -42,36 +43,36 @@ class EffectiveResponseConfig:
 
 
 class RealtimeApplicationService:
+    REALTIME_PCM_FORMAT = "audio/pcm"
+    REALTIME_AUDIO_SAMPLE_RATE = 24000
+
     def __init__(
         self,
         grpc_addr: str,
         interim_results: bool = False,
+        asr_hide_metadata: bool = True,
         chat_base_url: Optional[str] = None,
         chat_api_key: Optional[str] = None,
-        tts_base_url: Optional[str] = None,
-        tts_api_key: Optional[str] = None,
+        tts_backend: Optional[TTSBackend] = None,
     ):
         self.grpc_addr = grpc_addr
         self.interim_results = interim_results
+        self.asr_hide_metadata = asr_hide_metadata
         self.asr_inferencer = ASRInferencer(self.grpc_addr)
         self.chat_inferencer = (
             AsyncChatInferencer(api_key=chat_api_key, base_url=chat_base_url)
             if chat_api_key
             else None
         )
-        self.tts_inferencer = (
-            TTSInferencer(base_url=tts_base_url, api_key=tts_api_key)
-            if tts_api_key
-            else None
-        )
+        self.tts_backend = tts_backend
 
     async def close(self) -> None:
         if self.asr_inferencer:
             await self.asr_inferencer.close()
         if self.chat_inferencer:
             await self.chat_inferencer.close()
-        if self.tts_inferencer:
-            await self.tts_inferencer.close()
+        if self.tts_backend:
+            await self.tts_backend.close()
 
     def create_session(
         self,
@@ -86,9 +87,9 @@ class RealtimeApplicationService:
                 "Chat inferencer is not configured. Set chat_api_key/chat_base_url for realtime chat models."
             )
         normalized_modalities = self._normalize_output_modalities(list(output_modalities or ["text"]))
-        if "audio" in normalized_modalities and self.tts_inferencer is None:
+        if "audio" in normalized_modalities and self.tts_backend is None:
             raise RuntimeError(
-                "TTS inferencer is not configured. Set tts_api_key/tts_base_url for realtime audio output."
+                "TTS backend is not configured. Configure tts_backend for realtime audio output."
             )
         chat_session = AsyncChatSession(chat_inferencer=self.chat_inferencer)
         return RealtimeSessionState(
@@ -115,6 +116,16 @@ class RealtimeApplicationService:
         if model:
             session.chat_model = model
 
+        try:
+            self._validate_audio_input_update(update)
+        except ValueError as exc:
+            await session.writer.send_error(
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="invalid_audio_input_format",
+            )
+            return
+
         output_modalities = getattr(update, "output_modalities", None)
         if output_modalities is not None:
             try:
@@ -126,11 +137,11 @@ class RealtimeApplicationService:
                     code="invalid_output_modalities",
                 )
             else:
-                if "audio" in normalized_modalities and self.tts_inferencer is None:
+                if "audio" in normalized_modalities and self.tts_backend is None:
                     await session.writer.send_error(
                         message=(
-                            "TTS inferencer is not configured. "
-                            "Set tts_api_key/tts_base_url for realtime audio output."
+                            "TTS backend is not configured. "
+                            "Configure tts_backend for realtime audio output."
                         ),
                         error_type="invalid_request_error",
                         code="audio_output_not_configured",
@@ -146,6 +157,7 @@ class RealtimeApplicationService:
                 error_type="invalid_request_error",
                 code="invalid_audio_output_format",
             )
+            return
 
         raw_tools = getattr(update, "tools", None)
         if raw_tools is not None:
@@ -171,25 +183,26 @@ class RealtimeApplicationService:
                 inferencer=self.asr_inferencer,
                 session=session,
                 interim_results=self.interim_results,
+                hide_metadata=self.asr_hide_metadata,
                 is_chat_model=is_chat_model,
                 chat_worker=self.chat_worker,
             )
         )
 
-    async def chat_worker(self, session: RealtimeSessionState, user_message: str) -> None:
-        chat_stream = session.chat(user_message)
+    async def chat_worker(self, session: RealtimeSessionState, user_turn: PreparedRealtimeUserTurn) -> None:
+        chat_stream = session.chat(user_turn)
         response_cfg = self._resolve_response_config(session)
         if "audio" in response_cfg.modalities:
-            if self.tts_inferencer is None:
+            if self.tts_backend is None:
                 raise RuntimeError(
-                    "TTS inferencer is not configured. Set tts_api_key/tts_base_url for realtime audio output."
+                    "TTS backend is not configured. Configure tts_backend for realtime audio output."
                 )
             self._ensure_audio_output_supported(response_cfg.audio_format_type)
         result = await process_chat_stream(
             session=session,
             chat_stream=chat_stream,
             modalities=response_cfg.modalities,
-            tts_inferencer=self.tts_inferencer,
+            tts_backend=self.tts_backend,
             audio_output_format_type=response_cfg.audio_format_type,
             audio_output_voice=response_cfg.audio_voice,
             audio_output_speed=response_cfg.audio_speed,
@@ -218,11 +231,11 @@ class RealtimeApplicationService:
             return
 
         if "audio" in response_cfg.modalities:
-            if self.tts_inferencer is None:
+            if self.tts_backend is None:
                 await session.writer.send_error(
                     message=(
-                        "TTS inferencer is not configured. "
-                        "Set tts_api_key/tts_base_url for realtime audio output."
+                        "TTS backend is not configured. "
+                        "Configure tts_backend for realtime audio output."
                     ),
                     error_type="invalid_request_error",
                     code="audio_output_not_configured",
@@ -243,7 +256,7 @@ class RealtimeApplicationService:
             session=session,
             chat_stream=chat_stream,
             modalities=response_cfg.modalities,
-            tts_inferencer=self.tts_inferencer,
+            tts_backend=self.tts_backend,
             audio_output_format_type=response_cfg.audio_format_type,
             audio_output_voice=response_cfg.audio_voice,
             audio_output_speed=response_cfg.audio_speed,
@@ -298,10 +311,10 @@ class RealtimeApplicationService:
         return ["text"]
 
     def _ensure_audio_output_supported(self, format_type: str) -> None:
-        if format_type != "audio/pcm":
+        if format_type != self.REALTIME_PCM_FORMAT:
             raise ValueError(
                 f"Unsupported realtime audio output format '{format_type}'. "
-                "Only 'audio/pcm' is currently supported."
+                f"Only '{self.REALTIME_PCM_FORMAT}' is currently supported."
             )
 
     def _extract_format_type(self, format_config) -> Optional[str]:
@@ -312,6 +325,59 @@ class RealtimeApplicationService:
         if isinstance(format_config, dict):
             return format_config.get("type")
         return getattr(format_config, "type", None)
+
+    def _extract_format_rate(self, format_config) -> Optional[int]:
+        if format_config is None:
+            return None
+        if isinstance(format_config, dict):
+            rate = format_config.get("rate")
+        else:
+            rate = getattr(format_config, "rate", None)
+        if rate is None:
+            return None
+        return int(rate)
+
+    def _model_to_dict(self, value) -> dict:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "model_dump"):
+            return value.model_dump(exclude_none=True)
+        return {}
+
+    def _validate_audio_input_update(self, update) -> None:
+        audio_config = update.get("audio") if isinstance(update, dict) else getattr(update, "audio", None)
+        if audio_config is None:
+            return
+
+        input_config = (
+            audio_config.get("input")
+            if isinstance(audio_config, dict)
+            else getattr(audio_config, "input", None)
+        )
+        if input_config is None:
+            return
+
+        input_data = self._model_to_dict(input_config)
+        format_config = input_data.get("format")
+        if format_config is None:
+            return
+
+        format_type = self._extract_format_type(format_config)
+        format_rate = self._extract_format_rate(format_config)
+
+        if format_type is not None and format_type != self.REALTIME_PCM_FORMAT:
+            raise ValueError(
+                f"Unsupported realtime audio input format '{format_type}'. "
+                f"Only '{self.REALTIME_PCM_FORMAT}' is currently supported."
+            )
+
+        if format_rate is not None and format_rate != self.REALTIME_AUDIO_SAMPLE_RATE:
+            raise ValueError(
+                "Unsupported realtime audio input sample rate "
+                f"'{format_rate}'. Only '{self.REALTIME_AUDIO_SAMPLE_RATE}' is supported."
+            )
 
     def _apply_audio_output_update(self, session: RealtimeSessionState, update) -> None:
         audio_config = getattr(update, "audio", None)
@@ -462,10 +528,15 @@ class RealtimeApplicationService:
         session: RealtimeSessionState,
         model: str,
     ) -> dict:
+        input_cfg = session.get_audio_input_config()
         audio_cfg = session.get_audio_output_config()
+        input_format = {"type": input_cfg["format_type"]}
+        if input_cfg["format_type"] == self.REALTIME_PCM_FORMAT:
+            input_format["rate"] = input_cfg["sample_rate"]
+
         output_format = {"type": audio_cfg["format_type"]}
-        if audio_cfg["format_type"] == "audio/pcm":
-            output_format["rate"] = 24000
+        if audio_cfg["format_type"] == self.REALTIME_PCM_FORMAT:
+            output_format["rate"] = self.REALTIME_AUDIO_SAMPLE_RATE
 
         return {
             "id": session.session_id,
@@ -473,6 +544,9 @@ class RealtimeApplicationService:
             "model": model,
             "output_modalities": session.get_output_modalities(),
             "audio": {
+                "input": {
+                    "format": input_format,
+                },
                 "output": {
                     "format": output_format,
                     "voice": audio_cfg["voice"],

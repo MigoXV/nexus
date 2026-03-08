@@ -9,6 +9,7 @@ from nexus.application.realtime.service import RealtimeApplicationService
 from nexus.application.transcribe import TranscribeUseCase
 from nexus.application.tts import TextToSpeechUseCase
 from nexus.configs.config import NexusConfig
+from nexus.infrastructure.tts import create_tts_backend
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +34,15 @@ def configure(engine_config: NexusConfig) -> None:
     if _container is not None:
         return
 
+    tts_backend = create_tts_backend(engine_config)
+
     realtime = RealtimeApplicationService(
         grpc_addr=engine_config.asr_grpc_addr,
         interim_results=engine_config.asr_interim_results,
+        asr_hide_metadata=engine_config.asr_hide_metadata,
         chat_base_url=engine_config.chat_base_url,
         chat_api_key=engine_config.chat_api_key,
-        tts_base_url=engine_config.tts_base_url,
-        tts_api_key=engine_config.tts_api_key,
+        tts_backend=tts_backend,
     )
 
     _container = AppContainer(
@@ -54,8 +57,7 @@ def configure(engine_config: NexusConfig) -> None:
             interim_results=engine_config.asr_interim_results,
         ),
         tts=TextToSpeechUseCase(
-            base_url=engine_config.tts_base_url,
-            api_key=engine_config.tts_api_key,
+            backend=tts_backend,
         ),
     )
     logger.info("Application container initialized")

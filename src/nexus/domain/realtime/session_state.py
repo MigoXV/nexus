@@ -12,6 +12,7 @@ from openai.types.chat import ChatCompletionChunk
 from openai.types.realtime.realtime_function_tool import RealtimeFunctionTool
 
 from nexus.application.realtime.protocol.tools import to_chat_tools
+from nexus.application.realtime.text_processing import PreparedRealtimeUserTurn
 from nexus.infrastructure.mcp import McpToolRegistry
 from nexus.sessions.chat_session import AsyncChatSession
 
@@ -34,7 +35,9 @@ class RealtimeSessionState:
     tools: List[RealtimeFunctionTool] = field(default_factory=list)
     mcp_registry: McpToolRegistry = field(default_factory=McpToolRegistry)
 
-    sample_rate: int = 16000
+    audio_input_format_type: str = "audio/pcm"
+    audio_input_sample_rate: int = 24000
+    asr_sample_rate: int = 16000
     output_modalities: list[str] = field(default_factory=lambda: ["text"])
     audio_output_format_type: str = "audio/pcm"
     audio_output_voice: str = "alloy"
@@ -102,6 +105,12 @@ class RealtimeSessionState:
             "speed": self.audio_output_speed,
         }
 
+    def get_audio_input_config(self) -> dict:
+        return {
+            "format_type": self.audio_input_format_type,
+            "sample_rate": self.audio_input_sample_rate,
+        }
+
     def get_all_tools(self) -> List[RealtimeFunctionTool]:
         all_tools = list(self.tools)
         all_tools.extend(self.mcp_registry.to_realtime_function_tools())
@@ -113,9 +122,9 @@ class RealtimeSessionState:
     def get_mcp_server_for_tool(self, tool_name: str) -> Optional[str]:
         return self.mcp_registry.get_server_for_tool(tool_name)
 
-    async def chat(self, user_message: str) -> AsyncGenerator[ChatCompletionChunk, None]:
+    async def chat(self, user_turn: PreparedRealtimeUserTurn) -> AsyncGenerator[ChatCompletionChunk, None]:
         chat_stream_resp = self.chat_session.chat(
-            user_message=user_message,
+            user_message=user_turn.model_text,
             model=self.chat_model,
             stream=True,
             tools=to_chat_tools(self.get_all_tools()),

@@ -47,20 +47,23 @@ async def create_speech(
     mime_type = AUDIO_MIME_TYPES.get(request.response_format, "audio/mpeg")
 
     try:
+        audio_stream = await container.tts.stream_audio(
+            text=request.input,
+            model=request.model,
+            voice=request.voice,
+            response_format=request.response_format,
+            speed=request.speed,
+        )
         return StreamingResponse(
-            container.tts.stream_audio(
-                text=request.input,
-                model=request.model,
-                voice=request.voice,
-                response_format=request.response_format,
-                speed=request.speed,
-            ),
+            audio_stream,
             media_type=mime_type,
             headers={
                 "Content-Disposition": f'attachment; filename="speech.{request.response_format}"',
                 "Transfer-Encoding": "chunked",
             },
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error("TTS error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))

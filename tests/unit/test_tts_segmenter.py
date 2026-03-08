@@ -15,7 +15,7 @@ class FakeTTSInferencer:
     async def speech_stream(
         self,
         *,
-        input: str,
+        text: str,
         model: str = "tts-1",
         voice: str = "alloy",
         response_format: str = "pcm",
@@ -23,13 +23,13 @@ class FakeTTSInferencer:
         **kwargs,
     ):
         del model, voice, response_format, speed, kwargs
-        delay = self.delays.get(input, 0.0)
+        delay = self.delays.get(text, 0.0)
         if delay > 0:
             import asyncio
 
             await asyncio.sleep(delay)
 
-        content = input.encode("utf-8")
+        content = text.encode("utf-8")
         mid = len(content) // 2
         if mid > 0:
             yield content[:mid]
@@ -60,13 +60,39 @@ def test_split_text_to_tts_segments_keeps_short_single_utterance() -> None:
     assert segments == [text]
 
 
+def test_split_text_to_tts_segments_caps_each_segment_at_150_chars() -> None:
+    sentence_a = "甲" * 80 + "。"
+    sentence_b = "乙" * 80 + "。"
+    segments = split_text_to_tts_segments(
+        sentence_a + sentence_b,
+        min_segment_chars=30,
+        max_segment_chars=150,
+    )
+
+    assert segments
+    assert all(len(segment) <= 150 for segment in segments)
+    assert "".join(segments) == sentence_a + sentence_b
+
+
+def test_split_text_to_tts_segments_hard_splits_single_long_sentence() -> None:
+    text = "长" * 320
+    segments = split_text_to_tts_segments(
+        text,
+        min_segment_chars=30,
+        max_segment_chars=150,
+    )
+
+    assert [len(segment) for segment in segments] == [150, 150, 20]
+    assert "".join(segments) == text
+
+
 @pytest.mark.asyncio
 async def test_stream_tts_audio_for_text_keeps_segment_order() -> None:
     segment_a = "a" * 30 + "。"
     segment_b = "b" * 30 + "。"
     text = segment_a + segment_b
 
-    inferencer = FakeTTSInferencer(
+    backend = FakeTTSInferencer(
         delays={
             segment_a: 0.2,
             segment_b: 0.01,
@@ -79,7 +105,7 @@ async def test_stream_tts_audio_for_text_keeps_segment_order() -> None:
         emitted.append(chunk)
 
     await stream_tts_audio_for_text(
-        inferencer=inferencer,
+        backend=backend,
         text=text,
         voice="alloy",
         speed=1.0,

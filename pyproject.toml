@@ -24,7 +24,6 @@ dependencies = [
     "websockets (>=15.0.1,<16.0.0)",
     "omegaconf (>=2.3.0,<3.0.0)",
     "mcp (>=1.26.0,<2.0.0)",
-    "samplerate (>=0.2.3,<0.3.0)",
 ]
 
 [tool.poetry]

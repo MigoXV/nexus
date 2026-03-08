@@ -13,7 +13,7 @@ from tqdm import trange
 
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 24000
 CHANNELS = 1
 CHUNK_SIZE = 3200  # 每个块的字节大小
 
@@ -31,7 +31,7 @@ def load_audio_as_pcm16(file_path: str) -> bytes:
     )
     print(f"Duration: {len(audio) / 1000:.2f}s")
 
-    # 转换为 16kHz 单声道 PCM16
+    # 转换为 Realtime 协议要求的 24kHz 单声道 PCM16
     pcm_audio = (
         audio.set_frame_rate(SAMPLE_RATE)
         .set_channels(CHANNELS)

@@ -3,6 +3,7 @@
 
 提供用于管理响应生命周期的上下文管理器，自动处理前置/后置事件发送。
 """
+import asyncio
 import base64
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List
@@ -62,7 +63,7 @@ from .event_factory import (
 
 if TYPE_CHECKING:
     from nexus.domain.realtime import RealtimeSessionState
-    from nexus.infrastructure.tts import Inferencer as TTSInferencer
+    from nexus.infrastructure.tts import DuplexTTSSession, TTSBackend
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +269,7 @@ class AudioResponseContext:
         self,
         session: "RealtimeSessionState",
         *,
-        tts_inferencer: "TTSInferencer",
+        tts_backend: "TTSBackend",
         modalities: List[str] | None = None,
         format_type: str = "audio/pcm",
         voice: str = "alloy",
@@ -279,7 +280,7 @@ class AudioResponseContext:
         output_sample_rate: int | None = None,
     ):
         self.session = session
-        self.tts_inferencer = tts_inferencer
+        self.tts_backend = tts_backend
         self.modalities = modalities or ["audio"]
         self.format_type = format_type
         self.voice = voice
@@ -291,13 +292,20 @@ class AudioResponseContext:
         self.response_id = response_id()
         self.conversation_id = conversation_id()
 
-        self._content = ""
+        self._display_text = ""
+        self._tts_text = ""
         self._item = None
         self._audio_delta_count = 0
+        self._duplex_session: "DuplexTTSSession | None" = None
+        self._duplex_consumer_task = None
+        self._duplex_audio_failed = False
+        self._audio_started = False
+        self._pending_transcript_deltas: list[str] = []
 
         # 流式重采样：当上游 TTS 采样率与输出不一致时启用
         _in_rate = tts_sample_rate or self.TTS_INPUT_SAMPLE_RATE
         _out_rate = output_sample_rate or self.REALTIME_OUTPUT_SAMPLE_RATE
+        self._resampler_input_rate = _in_rate
         if _in_rate != _out_rate:
             self._resampler: StreamingResampler | None = StreamingResampler(
                 input_rate=_in_rate,
@@ -318,7 +326,11 @@ class AudioResponseContext:
 
     @property
     def content(self) -> str:
-        return self._content
+        return self._display_text
+
+    @property
+    def tts_content(self) -> str:
+        return self._tts_text
 
     async def __aenter__(self) -> "AudioResponseContext":
         await self.session.send_event(
@@ -351,31 +363,63 @@ class AudioResponseContext:
                 event_id=event_id(),
             )
         )
+        if getattr(self.tts_backend, "supports_duplex", False):
+            self._duplex_session = await self.tts_backend.open_duplex_session(
+                model="tts-1",
+                voice=self.voice,
+                response_format="pcm",
+                speed=self.speed,
+            )
+            self._duplex_consumer_task = asyncio.create_task(self._consume_duplex_audio())
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.finish(cancelled=False)
         return False
 
-    async def add_model_text_delta(self, delta: str) -> None:
-        if not delta:
+    async def add_model_text_delta(self, delta: str, *, tts_delta: str | None = None) -> None:
+        if not delta and not tts_delta:
             return
-        self._content += delta
-        if not self.include_transcript:
+        tts_delta = delta if tts_delta is None else tts_delta
+        if delta:
+            self._display_text += delta
+        if tts_delta:
+            self._tts_text += tts_delta
+        if self._duplex_session is not None and tts_delta:
+            await self._duplex_session.send_text(tts_delta)
+        if not self.include_transcript or not delta:
             return
-        await self.session.send_event(
-            build_audio_transcript_delta_event(
-                delta=delta,
-                item_id=self.item_id,
-                response_id=self.response_id,
-                event_id=event_id(),
-            )
-        )
+        if self._audio_started:
+            await self._emit_transcript_delta(delta)
+            return
+        self._pending_transcript_deltas.append(delta)
+
+    async def _consume_duplex_audio(self) -> None:
+        if self._duplex_session is None:
+            return
+        try:
+            async for chunk in self._duplex_session.iter_audio():
+                if chunk.sample_rate and self._resampler_input_rate != chunk.sample_rate:
+                    self._resampler_input_rate = chunk.sample_rate
+                    if chunk.sample_rate == self.REALTIME_OUTPUT_SAMPLE_RATE:
+                        self._resampler = None
+                    else:
+                        self._resampler = StreamingResampler(
+                            input_rate=chunk.sample_rate,
+                            output_rate=self.REALTIME_OUTPUT_SAMPLE_RATE,
+                        )
+                await self._send_audio_bytes(chunk.data)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._duplex_audio_failed = True
+            raise
 
     async def _send_audio_raw(self, audio_bytes: bytes) -> None:
         """直接将音频 bytes base64 编码后发送给客户端。"""
         if not audio_bytes:
             return
+        is_first_audio_delta = not self._audio_started
         delta_b64 = base64.b64encode(audio_bytes).decode("utf-8")
         await self.session.send_event(
             build_audio_delta_event(
@@ -386,22 +430,35 @@ class AudioResponseContext:
             )
         )
         self._audio_delta_count += 1
+        if is_first_audio_delta:
+            self._audio_started = True
+            await self._flush_pending_transcript_deltas()
 
     async def _send_audio_bytes(self, audio_bytes: bytes) -> None:
         """接收上游 TTS 原始音频，经流式重采样后发送。"""
         if self._resampler is not None:
-            resampled = self._resampler.process(audio_bytes)
+            resampled = await self._resampler.aprocess(audio_bytes)
             if resampled:
                 await self._send_audio_raw(resampled)
         else:
             await self._send_audio_raw(audio_bytes)
 
     async def synthesize_audio(self) -> None:
-        if not self._content.strip():
+        if not self._tts_text.strip():
             return
+        if self._duplex_session is not None:
+            await self._duplex_session.end_input()
+            if self._duplex_consumer_task is not None:
+                await self._duplex_consumer_task
+            if self._resampler is not None:
+                tail = await self._resampler.aflush()
+                if tail:
+                    await self._send_audio_raw(tail)
+            return
+
         await stream_tts_audio_for_text(
-            inferencer=self.tts_inferencer,
-            text=self._content,
+            backend=self.tts_backend,
+            text=self._tts_text,
             voice=self.voice,
             speed=self.speed,
             format_type=self.format_type,
@@ -411,7 +468,7 @@ class AudioResponseContext:
         )
         # 冲刷重采样器内部滤波器缓冲区中的剩余数据
         if self._resampler is not None:
-            tail = self._resampler.flush()
+            tail = await self._resampler.aflush()
             if tail:
                 await self._send_audio_raw(tail)
 
@@ -423,6 +480,11 @@ class AudioResponseContext:
         error_code: str | None = None,
         error_type: str | None = None,
     ) -> None:
+        if cancelled or failed:
+            await self._abort_duplex()
+        else:
+            await self._close_duplex()
+
         await self.session.send_event(
             build_audio_done_event(
                 item_id=self.item_id,
@@ -431,17 +493,17 @@ class AudioResponseContext:
             )
         )
 
-        if self.include_transcript:
+        transcript = self._display_text if self.include_transcript and self._audio_started else None
+        if transcript is not None:
             await self.session.send_event(
                 build_audio_transcript_done_event(
-                    transcript=self._content,
+                    transcript=transcript,
                     item_id=self.item_id,
                     response_id=self.response_id,
                     event_id=event_id(),
                 )
             )
 
-        transcript = self._content if self.include_transcript else None
         await self.session.send_event(
             build_audio_content_part_done_event(
                 item_id=self.item_id,
@@ -495,7 +557,7 @@ class AudioResponseContext:
                 "AudioResponseContext failed: item_id=%s response_id=%s content_len=%s deltas=%s",
                 self.item_id,
                 self.response_id,
-                len(self._content),
+                len(self._display_text),
                 self._audio_delta_count,
             )
             return
@@ -520,7 +582,7 @@ class AudioResponseContext:
                 "AudioResponseContext cancelled: item_id=%s response_id=%s content_len=%s deltas=%s",
                 self.item_id,
                 self.response_id,
-                len(self._content),
+                len(self._display_text),
                 self._audio_delta_count,
             )
             return
@@ -537,9 +599,41 @@ class AudioResponseContext:
             "AudioResponseContext completed: item_id=%s response_id=%s content_len=%s deltas=%s",
             self.item_id,
             self.response_id,
-            len(self._content),
+            len(self._display_text),
             self._audio_delta_count,
         )
+
+    async def _abort_duplex(self) -> None:
+        if self._duplex_consumer_task is not None and not self._duplex_consumer_task.done():
+            self._duplex_consumer_task.cancel()
+            try:
+                await self._duplex_consumer_task
+            except asyncio.CancelledError:
+                pass
+        await self._close_duplex()
+
+    async def _close_duplex(self) -> None:
+        if self._duplex_session is not None:
+            await self._duplex_session.aclose()
+            self._duplex_session = None
+
+    async def _emit_transcript_delta(self, delta: str) -> None:
+        await self.session.send_event(
+            build_audio_transcript_delta_event(
+                delta=delta,
+                item_id=self.item_id,
+                response_id=self.response_id,
+                event_id=event_id(),
+            )
+        )
+
+    async def _flush_pending_transcript_deltas(self) -> None:
+        if not self.include_transcript or not self._pending_transcript_deltas:
+            return
+        pending = self._pending_transcript_deltas
+        self._pending_transcript_deltas = []
+        for delta in pending:
+            await self._emit_transcript_delta(delta)
 
 
 class FunctionCallResponseContext:

@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package qwen_tts.service.v1;
+
+message ReferenceVoice {
+  bytes pcm_s16le = 1;
+  int32 sample_rate = 2;
+  string ref_text = 3;
+}
+
+message VoiceSource {
+  oneof source {
+    ReferenceVoice reference_voice = 1;
+    string preset_voice_id = 2;
+  }
+}
+
+message SynthesizeRequest {
+  VoiceSource voice = 1;
+  string text = 2;
+  string language = 3;
+  int32 decoder_chunk_size = 4;
+}
+
+message DuplexStreamConfig {
+  VoiceSource voice = 1;
+  string language = 2;
+  int32 decoder_chunk_size = 3;
+}
+
+message DuplexSynthesizeRequest {
+  oneof payload {
+    DuplexStreamConfig config = 1;
+    string text_chunk = 2;
+  }
+}
+
+message AudioChunk {
+  bytes pcm_s16le = 1;
+  int32 sample_rate = 2;
+  uint32 chunk_index = 3;
+}
+
+service TtsService {
+  rpc Synthesize(SynthesizeRequest) returns (stream AudioChunk);
+  rpc DuplexSynthesize(stream DuplexSynthesizeRequest) returns (stream AudioChunk);
+}
